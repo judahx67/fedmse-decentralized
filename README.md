@@ -1,6 +1,7 @@
 # Fed-IoTIDS
 FedMSE: Semi-supservised federated learning for IoT network intrusion detection
 
+This repository includes the prepared data for all subnetworks in the IoT network and the source code for reproducing the experimental results
 # Project structure
 
 1. Data/ folder: Store data for experiments
@@ -18,28 +19,28 @@ FedMSE: Semi-supservised federated learning for IoT network intrusion detection
 # How to run the experiments
 1. Configure the data for experimental
 
-'''
+```
 config_file = f"Configuration/scen2-nba-iot-10clients.json"
-'''
+```
 
 2. Configure some hyper-parameters for experiment
 
-'''
+```
 num_participants = 0.5
 epoch = 100
 num_rounds = 20
 lr_rate = 1e-5
 shrink_lambda = 10
-'''
+```
 
 3. Install dependency libraries
 
-'''
+```
 pip install -r requirements.txt
-'''
+```
 
 4. Run the experiment
 
-'''
+```
 python main.py
-'''
+```

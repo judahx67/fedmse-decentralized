@@ -14,3 +14,32 @@ FedMSE: Semi-supservised federated learning for IoT network intrusion detection
     - Trainer/ --> Modules for local training and global aggregation
     - Utils/ --> Utils for calculate the sim score
     - Visualization/ --> Jupyter notebook for visualizing the data and results
+
+# How to run the experiments
+1. Configure the data for experimental
+
+'''
+config_file = f"Configuration/scen2-nba-iot-10clients.json"
+'''
+
+2. Configure some hyper-parameters for experiment
+
+'''
+num_participants = 0.5
+epoch = 100
+num_rounds = 20
+lr_rate = 1e-5
+shrink_lambda = 10
+'''
+
+3. Install dependency libraries
+
+'''
+pip install -r requirements.txt
+'''
+
+4. Run the experiment
+
+'''
+python main.py
+'''

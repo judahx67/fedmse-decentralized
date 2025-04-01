@@ -1,5 +1,5 @@
 # Fed-IoTIDS
-The implementation of paper: *FedMSE: Semi-supservised federated learning for IoT network intrusion detection*
+The implementation of paper: [*FedMSE: Semi-supservised federated learning for IoT network intrusion detection*](https://doi.org/10.1016/j.cose.2025.104337)
 
 This repository includes the prepared data for all subnetworks in the IoT network and the source code for reproducing the experimental results
 # Project structure

@@ -13,7 +13,8 @@ from sklearn.neighbors import KernelDensity
 from tqdm import tqdm
 from Utils import similarity_score
 from DataLoader import IoTDataProccessor
-
+import networkx as nx
+import random
 import logging
 
 # Configure the logging module
@@ -21,7 +22,7 @@ logging.basicConfig(level=logging.INFO,  # Set the logging level (DEBUG, INFO, W
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
 class GlobalAggregator(object):
-    def __init__(self, model, update_type="avg"):
+    def __init__(self, model, update_type="avg", topology_type="ring", num_clients=10):
         """
             - initialize the SAE model in global: the model architecture: input-dim, 
                 output-dim, latent-dim
@@ -30,7 +31,84 @@ class GlobalAggregator(object):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.update_type = update_type
         self.model = model.to(self.device)
-    
+        self.num_clients = num_clients
+        self.topology_type = topology_type
+        self.topology = self._create_topology()
+        
+    def _create_topology(self):
+        """
+        Create the network topology for decentralized communication
+        """
+        if self.topology_type == "ring":
+            # Create a ring topology
+            G = nx.Graph()
+            for i in range(self.num_clients):
+                G.add_edge(i, (i + 1) % self.num_clients)
+        elif self.topology_type == "random":
+            # Create a random topology with average degree of 3
+            G = nx.Graph()
+            for i in range(self.num_clients):
+                G.add_node(i)
+            # Add random edges
+            for i in range(self.num_clients):
+                num_edges = random.randint(2, 4)  # Random number of connections
+                for _ in range(num_edges):
+                    j = random.randint(0, self.num_clients - 1)
+                    if i != j:
+                        G.add_edge(i, j)
+        elif self.topology_type == "mesh":
+            # Create a mesh topology (fully connected)
+            G = nx.complete_graph(self.num_clients)
+        else:
+            raise ValueError(f"Unknown topology type: {self.topology_type}")
+        
+        return G
+
+    def decentralized_update(self, local_models, num_rounds=5):
+        """
+        Perform decentralized federated learning updates
+        
+        Args:
+            local_models (list): List of local models
+            num_rounds (int): Number of communication rounds
+            
+        Returns:
+            list: Updated local models
+        """
+        logging.info(f"Starting decentralized update with {self.topology_type} topology")
+        updated_models = local_models.copy()
+        
+        for round in range(num_rounds):
+            logging.info(f"Decentralized round {round + 1}/{num_rounds}")
+            
+            # For each client, aggregate with its neighbors
+            for client_id in range(self.num_clients):
+                # Get neighbors of current client
+                neighbors = list(self.topology.neighbors(client_id))
+                
+                if not neighbors:
+                    continue
+                
+                # Collect models from neighbors
+                neighbor_models = [updated_models[neighbor] for neighbor in neighbors]
+                neighbor_models.append(updated_models[client_id])  # Include own model
+                
+                # Calculate weights based on number of samples
+                total_samples = sum(model[2] for model in neighbor_models)
+                weights = [model[2] / total_samples for model in neighbor_models]
+                
+                # Aggregate models
+                avg_weights = {}
+                for key in neighbor_models[0][0].keys():
+                    avg_weights[key] = sum(model[0][key] * weight 
+                                         for model, weight in zip(neighbor_models, weights))
+                
+                # Update client's model
+                updated_models[client_id] = (avg_weights, updated_models[client_id][1], 
+                                          updated_models[client_id][2])
+        
+        return updated_models
+
     def create_dev_dataset(self, dataset):
         """
         Choose a development dataset for updating the global model (Fusion-based)
@@ -240,13 +318,17 @@ class GlobalAggregator(object):
         Returns:
             None
         """
-        if self.update_type == "avg":
+        if self.update_type == "decentralized":
+            updated_models = self.decentralized_update(local_models)
+            # Use the last client's model as the global model
+            self.model.load_state_dict(updated_models[-1][0])
+        elif self.update_type == "avg":
             self.fed_avg(local_models)
-        if self.update_type == "fusion_avg":
+        elif self.update_type == "fusion_avg":
             self.fusion_avg(local_models)
-        if self.update_type == "mse_avg":
+        elif self.update_type == "mse_avg":
             self.fed_mse_avg(local_models)
-        if self.update_type == "fedprox":
+        elif self.update_type == "fedprox":
             self.fedprox(local_models, mu=0.01)
         
         self.model.eval()

@@ -25,6 +25,8 @@ from DataLoader import IoTDataProccessor
 from Trainer import ClientTrainer
 from Trainer import GlobalAggregator
 from Evaluator import Evaluator
+import networkx as nx
+from collections import defaultdict
 
 import logging
 
@@ -34,16 +36,17 @@ logging.basicConfig(level=logging.INFO,  # Set the logging level (DEBUG, INFO, W
 
 
 num_participants = 0.5
-epoch = 100
-num_rounds = 20
+epoch = 1 #100
+num_rounds = 1 #20
 lr_rate = 1e-5
-shrink_lambda = 10
-network_size = 50
-data_seed = 1234
+shrink_lambda = 1 #10
+network_size = 10 #50
+data_seed = 1111 #1234
+topology_type = "ring"  # Options: "ring", "random", "mesh"
 # no_Exp = f"nonIID_Exp1_Rerun_{epoch}epoch_10client_lr0001_lamda{shrink_lambda}_ratio{num_participants*100}"
 no_Exp = f"IID-Update_Exp6_scale_{epoch}epoch_{network_size}client_{num_rounds}rounds_lr{lr_rate}_lamda{shrink_lambda}_ratio{num_participants*100}_dataseed{data_seed}"
 
-num_runs = 5
+num_runs = 1
 batch_size = 12
 
 new_device = True
@@ -57,8 +60,8 @@ dim_features = 115   #nba-iot: 115; cic-2023: 46
 
 scen_name = 'FL-IoT' 
 
-config_file = f"Configuration/scen2-nba-iot-50clients.json"
-# config_file = "Configuration/scen2-nba-iot-10clients.json"
+#config_file = f"Configuration/scen2-nba-iot-10clients.json"
+config_file = "Configuration/scen2-nba-iot-10clients.json"
 # config_file = "Configuration/cic-config.json"
 
 def set_seeds(seed):
@@ -67,6 +70,65 @@ def set_seeds(seed):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+def calculate_trust_score(model, client_data, device):
+    """Calculate trust score for a node based on model performance and data quality"""
+    model.eval()
+    with torch.no_grad():
+        # Calculate reconstruction error on client's data
+        _, generated_data, loss = model(client_data.to(device))
+        reconstruction_error = loss.item()
+        
+        # Calculate data quality metrics
+        data_quality = np.std(client_data.cpu().numpy())  # Higher variance might indicate better data diversity
+        
+        # Combine metrics (lower reconstruction error and higher data quality = higher trust)
+        trust_score = data_quality / (1 + reconstruction_error)
+        
+    return trust_score
+
+def select_aggregator(client_models, client_info, device, G):
+    """Select the most trusted node as aggregator through voting"""
+    trust_scores = []
+    votes = defaultdict(int)
+    
+    # Each node calculates trust scores for all other nodes
+    for i, (model, client) in enumerate(zip(client_models, client_info)):
+        # Get a sample of data from the client
+        sample_data = next(iter(client["train_loader"]))[0]
+        
+        # Calculate trust score for this node
+        trust_score = calculate_trust_score(model, sample_data, device)
+        trust_scores.append((i, trust_score))
+    
+    # Each node votes for the node with highest trust score among its neighbors
+    for i in range(len(client_models)):
+        neighbors = list(G.neighbors(i))
+        if not neighbors:
+            continue
+            
+        # Get trust scores of neighbors
+        neighbor_scores = [(j, score) for j, score in trust_scores if j in neighbors]
+        if neighbor_scores:
+            # Vote for the neighbor with highest trust score
+            best_neighbor = max(neighbor_scores, key=lambda x: x[1])[0]
+            votes[best_neighbor] += 1
+    
+    # Select the node with most votes as aggregator
+    if votes:
+        aggregator = max(votes.items(), key=lambda x: x[1])[0]
+        logging.info(f"\nVoting Results:")
+        logging.info(f"Trust Scores: {dict(trust_scores)}")
+        logging.info(f"Votes: {dict(votes)}")
+        logging.info(f"Selected Aggregator: Node {client_info[aggregator]['device']}")
+        return aggregator
+    else:
+        # If no votes, select the node with highest trust score
+        aggregator = max(trust_scores, key=lambda x: x[1])[0]
+        logging.info(f"\nNo votes cast, selecting node with highest trust score:")
+        logging.info(f"Trust Scores: {dict(trust_scores)}")
+        logging.info(f"Selected Aggregator: Node {client_info[aggregator]['device']}")
+        return aggregator
 
 if __name__ == "__main__":
         random.seed(data_seed)
@@ -170,7 +232,7 @@ if __name__ == "__main__":
                 "test_dataset": (processed_test_data, test_label),
                 "dev_normal_dataset": dev_normal_data
             })
-        for update_type in ["avg", "fedprox", "mse_avg"]:
+        for update_type in ["avg", "fedprox", "mse_avg", "decentralized"]:
         # for update_type in ["fedprox"]:
         # for update_type in ["mse_avg"]:
             # for model_type in ["autoencoder"]:
@@ -241,62 +303,180 @@ if __name__ == "__main__":
                             # Start training process
                             results = []
                             client_latent = {}
+                            
+                            # Create network topology
+                            if update_type == "decentralized":
+                                if topology_type == "ring":
+                                    G = nx.Graph()
+                                    for i in range(len(client_info)):
+                                        G.add_edge(i, (i + 1) % len(client_info))
+                                elif topology_type == "random":
+                                    G = nx.Graph()
+                                    for i in range(len(client_info)):
+                                        G.add_node(i)
+                                    for i in range(len(client_info)):
+                                        num_edges = random.randint(2, 4)
+                                        for _ in range(num_edges):
+                                            j = random.randint(0, len(client_info) - 1)
+                                            if i != j:
+                                                G.add_edge(i, j)
+                                elif topology_type == "mesh":
+                                    G = nx.complete_graph(len(client_info))
+                                
+                                logging.info(f"\n{'='*50}")
+                                logging.info(f"Network Topology Information:")
+                                logging.info(f"Type: {topology_type}")
+                                logging.info(f"Number of nodes: {len(client_info)}")
+                                logging.info(f"Average node degree: {sum(dict(G.degree()).values())/len(client_info):.2f}")
+                                logging.info(f"Network diameter: {nx.diameter(G)}")
+                                logging.info(f"Network density: {nx.density(G):.3f}")
+                                logging.info(f"{'='*50}\n")
+
+                            logging.info(f"\n{'='*50}")
+                            logging.info(f"Starting Training")
+                            logging.info(f"Model Type: {model_type}")
+                            logging.info(f"Update Type: {update_type}")
+                            logging.info(f"Number of Clients: {len(client_info)}")
+                            logging.info(f"Participation Rate: {num_participants*100}%")
+                            logging.info(f"{'='*50}\n")
+
+                            # Initialize client models
+                            client_models = []
+                            for client in client_info:
+                                if model_type == "hybrid":
+                                    model = Shrink_Autoencoder(input_dim=dim_features,
+                                                             output_dim=dim_features,
+                                                             shrink_lambda=shrink_lambda,
+                                                             latent_dim=11,
+                                                             hidden_neus=50)
+                                else:
+                                    model = Autoencoder(input_dim=dim_features,
+                                                      output_dim=dim_features,
+                                                      latent_dim=11,
+                                                      hidden_neus=50)
+                                client_models.append(model)
+
                             for round in range(num_rounds):
                                 client_latent[round] = {}
-                                dev_dataset = []
-                                dev_label = []
-                                selected_idx = random.sample([i for i in range(len(client_info))], int(num_participants*len(client_info)))
-                                selected_clients = [client_info[i] for i in selected_idx]
                                 
-                                total_training_samples = sum([len(client['train_loader'].dataset) for client in selected_clients])
-                                
-                                # for client in client_info:
-                                #     # indices = np.random.choice(client['dev_normal_dataset'].shape[0], 50, replace=False)
-                                #     n_samples = min(20, len(client['dev_normal_dataset']))
-                                #     sample_data = client['dev_normal_dataset'].sample(n=n_samples)
-                                #     dev_dataset.append(sample_data)
-                                #     client['dev_normal_dataset'] = client['dev_normal_dataset'].drop(sample_data.index)
-
-                                # dev_dataset = np.concatenate(dev_dataset, axis=0)
-                                # dev_label = np.concatenate(dev_label, axis=0)
-                                # dev_dataset = np.concatenate([client['dev_normal_dataset'] for client in client_info], axis=0)
-                                # global_aggregator.create_dev_dataset({"dataset": dev_dataset, "label": dev_label})
-                                # global_aggregator.create_dev_dataset({"dataset": dev_dataset})
-                                # Choose clients to train
-                                # random.seed(round*1234)
-                                # num_participants = random.uniform(0,1)
-                                
-                                client_weights = []
-                                # if round == 0:
-                                for i, client in enumerate(selected_clients):
-                                    logging.info("Training local model...")
-                                    device_trainer = ClientTrainer(model=global_aggregator.model, \
-                                        save_dir=client['save_dir'], epoch=epoch, lr_rate=lr_rate, update_type=update_type)
+                                if update_type == "decentralized":
+                                    logging.info(f"\n{'='*50}")
+                                    logging.info(f"Round {round+1}/{num_rounds}")
+                                    logging.info(f"Network Communication Pattern:")
                                     
-                                    device_trainer.run(client["train_loader"], client["valid_loader"])
-                                    client_weights.append((copy.deepcopy(device_trainer.model.state_dict()), total_training_samples, len(client["train_loader"].dataset)))
-                                    logging.info(f"Client {i} training done!")
+                                    # Each node trains locally
+                                    for i, client in enumerate(client_info):
+                                        device_trainer = ClientTrainer(model=client_models[i],
+                                                                     save_dir=client['save_dir'],
+                                                                     epoch=epoch,
+                                                                     lr_rate=lr_rate,
+                                                                     update_type=update_type)
+                                        device_trainer.run(client["train_loader"], client["valid_loader"])
                                     
-                                # client_weights = random.sample(client_weights, int(num_participants * len(client_weights)))
-                                global_aggregator.update(local_models=client_weights)
+                                    # Select aggregator through voting
+                                    aggregator_idx = select_aggregator(client_models, client_info, device_trainer.device, G)
+                                    logging.info(f"Selected {client_info[aggregator_idx]['device']} as aggregator for round {round+1}")
+                                    
+                                    # All nodes aggregate with the voted aggregator
+                                    for i in range(len(client_info)):
+                                        if i == aggregator_idx:
+                                            # Aggregator node aggregates with its neighbors
+                                            neighbors = list(G.neighbors(i))
+                                            if not neighbors:
+                                                continue
+                                                
+                                            # Collect models from neighbors
+                                            neighbor_models = [client_models[neighbor] for neighbor in neighbors]
+                                            neighbor_models.append(client_models[i])  # Include own model
+                                            
+                                            # Calculate weights based on number of samples
+                                            total_samples = sum(len(client_info[j]["train_loader"].dataset) for j in neighbors + [i])
+                                            weights = [len(client_info[j]["train_loader"].dataset) / total_samples for j in neighbors + [i]]
+                                            
+                                            # Give aggregator higher weight
+                                            weights = [w * 1.5 if j == i else w * 0.9 for j, w in enumerate(weights)]
+                                            weights = [w / sum(weights) for w in weights]  # Renormalize
+                                            
+                                            # Aggregate models
+                                            avg_weights = {}
+                                            for key in neighbor_models[0].state_dict().keys():
+                                                avg_weights[key] = sum(model.state_dict()[key] * weight 
+                                                                     for model, weight in zip(neighbor_models, weights))
+                                            
+                                            # Update aggregator's model
+                                            client_models[i].load_state_dict(avg_weights)
+                                            logging.info(f"Aggregator {client_info[i]['device']} aggregated with neighbors: {[client_info[j]['device'] for j in neighbors]}")
+                                        else:
+                                            # Non-aggregator nodes aggregate with the aggregator
+                                            aggregator_model = client_models[aggregator_idx]
+                                            own_model = client_models[i]
+                                            
+                                            # Calculate weights (give aggregator higher weight)
+                                            total_samples = len(client_info[i]["train_loader"].dataset) + len(client_info[aggregator_idx]["train_loader"].dataset)
+                                            own_weight = len(client_info[i]["train_loader"].dataset) / total_samples * 0.4  # Reduce own weight
+                                            aggregator_weight = len(client_info[aggregator_idx]["train_loader"].dataset) / total_samples * 1.6  # Increase aggregator weight
+                                            
+                                            # Aggregate models
+                                            avg_weights = {}
+                                            for key in own_model.state_dict().keys():
+                                                avg_weights[key] = (own_model.state_dict()[key] * own_weight + 
+                                                                  aggregator_model.state_dict()[key] * aggregator_weight)
+                                            
+                                            # Update node's model
+                                            client_models[i].load_state_dict(avg_weights)
+                                            logging.info(f"Node {client_info[i]['device']} aggregated with aggregator {client_info[aggregator_idx]['device']}")
+                                    
+                                    # Use the aggregator's model for evaluation
+                                    global_aggregator.model = client_models[aggregator_idx]
+                                else:
+                                    # Original centralized federated learning code
+                                    selected_idx = random.sample([i for i in range(len(client_info))], int(num_participants*len(client_info)))
+                                    selected_clients = [client_info[i] for i in selected_idx]
+                                    
+                                    total_training_samples = sum([len(client['train_loader'].dataset) for client in selected_clients])
+                                    
+                                    client_weights = []
+                                    for i, client in enumerate(selected_clients):
+                                        device_trainer = ClientTrainer(model=global_aggregator.model,
+                                                                     save_dir=client['save_dir'],
+                                                                     epoch=epoch,
+                                                                     lr_rate=lr_rate,
+                                                                     update_type=update_type)
+                                        device_trainer.run(client["train_loader"], client["valid_loader"])
+                                        client_weights.append((copy.deepcopy(device_trainer.model.state_dict()),
+                                                             total_training_samples,
+                                                             len(client["train_loader"].dataset)))
+                                    
+                                    global_aggregator.update(local_models=client_weights)
 
-                                logging.info(f"Round {round+1}/{num_rounds} - Updated global model - \
-                                    Global loss: {global_aggregator.val_loss}")
-                                
-                                logging.info("Training done! Evaluating...")
-                                # evaluate the model in clients
-                            
+                                # Evaluation
                                 evaluator = Evaluator(global_aggregator.model, metric=metric, model_type=model_type)
                                 round_results = {}
                                 
+                                # Calculate global validation loss
+                                global_aggregator.model.eval()
+                                with torch.no_grad():
+                                    # Use the development dataset for validation
+                                    if hasattr(global_aggregator, 'dev_dataset'):
+                                        _, _, val_loss = global_aggregator.model(torch.Tensor(global_aggregator.dev_dataset).to(device_trainer.device))
+                                        global_aggregator.val_loss = val_loss.item()
+                                    else:
+                                        # If no dev dataset, use average of client validation losses
+                                        val_losses = []
+                                        for client in client_info:
+                                            for batch in client["valid_loader"]:
+                                                _, _, loss = global_aggregator.model(batch[0].to(device_trainer.device))
+                                                val_losses.append(loss.item())
+                                        global_aggregator.val_loss = np.mean(val_losses)
+                                
                                 for i, client in enumerate(client_info):
-                                    logging.info(f"Evaluating client {i} - name: {client['device']}")
                                     auc_score, test_latent, test_label = evaluator.evaluate(client["test_loader"], client["train_loader"])
                                     round_results[client['device']] = auc_score
-                                    # store latent of SAE and SAE_MSEFed
                                     client_latent[round][client['device']] = (test_latent, test_label)
+                                
                                 round_results["global_loss"] = global_aggregator.val_loss
-                                round_results['join_clients'] = selected_idx
+                                if update_type != "decentralized":
+                                    round_results['join_clients'] = selected_idx
                                 round_results = {f'round_{round+1}': round_results}
                                 
                                 # Append to the JSON file
@@ -306,12 +486,23 @@ if __name__ == "__main__":
                                 if global_aggregator.val_loss < min_val_loss:
                                     min_val_loss = global_aggregator.val_loss
                                     global_worse = 0
+                                    logging.info("New best model found!")
                                 
                                 if global_aggregator.val_loss >= min_val_loss:
                                     global_worse += 1
                                     if global_worse > global_patience:
-                                        logging.info("Early stopping in global round!")
+                                        logging.info(f"\n{'='*50}")
+                                        logging.info("Early stopping triggered!")
+                                        logging.info(f"Best loss: {min_val_loss:.6f}")
+                                        logging.info(f"{'='*50}\n")
                                         break
+
+                            logging.info(f"\n{'='*50}")
+                            logging.info("Training Complete!")
+                            logging.info(f"Final Global Loss: {global_aggregator.val_loss:.6f}")
+                            logging.info(f"Best Loss: {min_val_loss:.6f}")
+                            logging.info(f"{'='*50}\n")
+
                             # store latent data of SAE and SAE_MSEFed for all rounds
                             # Define the file path
                             file_path = f'Checkpoint/LatentData/{network_size}/{no_Exp}/Run_{run}/latent_{model_type}_{update_type}.pkl'

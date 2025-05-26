@@ -18,7 +18,7 @@ import random
 import logging
 
 # Configure the logging module
-logging.basicConfig(level=logging.INFO,  # Set the logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
 class GlobalAggregator(object):
@@ -34,6 +34,18 @@ class GlobalAggregator(object):
         self.num_clients = num_clients
         self.topology_type = topology_type
         self.topology = self._create_topology()
+        self._log_topology_info()
+        
+    def _log_topology_info(self):
+        """Log information about the network topology"""
+        logging.info(f"\n{'='*50}")
+        logging.info(f"Network Topology Information:")
+        logging.info(f"Type: {self.topology_type}")
+        logging.info(f"Number of nodes: {self.num_clients}")
+        logging.info(f"Average node degree: {sum(dict(self.topology.degree()).values())/self.num_clients:.2f}")
+        logging.info(f"Network diameter: {nx.diameter(self.topology)}")
+        logging.info(f"Network density: {nx.density(self.topology):.3f}")
+        logging.info(f"{'='*50}\n")
         
     def _create_topology(self):
         """
@@ -75,39 +87,85 @@ class GlobalAggregator(object):
         Returns:
             list: Updated local models
         """
-        logging.info(f"Starting decentralized update with {self.topology_type} topology")
-        updated_models = local_models.copy()
+        logging.info(f"\n{'='*50}")
+        logging.info(f"Starting Decentralized Learning")
+        logging.info(f"Topology: {self.topology_type}")
+        logging.info(f"Number of rounds: {num_rounds}")
+        logging.info(f"Number of models: {len(local_models)}")
+        logging.info(f"{'='*50}\n")
+        
+        # Extract just the model state dicts from the tuples
+        updated_models = [model[0] for model in local_models]
+        num_models = len(updated_models)
+        
+        # Create a temporary topology for this update
+        temp_topology = self._create_topology()
+        # Ensure topology has correct number of nodes
+        if len(temp_topology.nodes()) != num_models:
+            temp_topology = nx.Graph()
+            for i in range(num_models):
+                temp_topology.add_node(i)
+            # Add edges based on topology type
+            if self.topology_type == "ring":
+                for i in range(num_models):
+                    temp_topology.add_edge(i, (i + 1) % num_models)
+            elif self.topology_type == "random":
+                for i in range(num_models):
+                    num_edges = random.randint(2, min(4, num_models-1))
+                    for _ in range(num_edges):
+                        j = random.randint(0, num_models - 1)
+                        if i != j:
+                            temp_topology.add_edge(i, j)
+            elif self.topology_type == "mesh":
+                for i in range(num_models):
+                    for j in range(i+1, num_models):
+                        temp_topology.add_edge(i, j)
         
         for round in range(num_rounds):
-            logging.info(f"Decentralized round {round + 1}/{num_rounds}")
+            round_communications = 0
+            round_aggregations = 0
             
             # For each client, aggregate with its neighbors
-            for client_id in range(self.num_clients):
+            for client_id in range(num_models):
                 # Get neighbors of current client
-                neighbors = list(self.topology.neighbors(client_id))
+                neighbors = list(temp_topology.neighbors(client_id))
                 
                 if not neighbors:
                     continue
+                
+                round_communications += len(neighbors)
+                round_aggregations += 1
                 
                 # Collect models from neighbors
                 neighbor_models = [updated_models[neighbor] for neighbor in neighbors]
                 neighbor_models.append(updated_models[client_id])  # Include own model
                 
                 # Calculate weights based on number of samples
-                total_samples = sum(model[2] for model in neighbor_models)
-                weights = [model[2] / total_samples for model in neighbor_models]
+                total_samples = sum(local_models[j][2] for j in neighbors + [client_id])
+                weights = [local_models[j][2] / total_samples for j in neighbors + [client_id]]
                 
                 # Aggregate models
                 avg_weights = {}
-                for key in neighbor_models[0][0].keys():
-                    avg_weights[key] = sum(model[0][key] * weight 
+                for key in neighbor_models[0].keys():
+                    avg_weights[key] = sum(model[key] * weight 
                                          for model, weight in zip(neighbor_models, weights))
                 
                 # Update client's model
-                updated_models[client_id] = (avg_weights, updated_models[client_id][1], 
-                                          updated_models[client_id][2])
+                updated_models[client_id] = avg_weights
+            
+            logging.info(f"\nRound {round + 1}/{num_rounds} Statistics:")
+            logging.info(f"Total communications: {round_communications}")
+            logging.info(f"Total aggregations: {round_aggregations}")
+            logging.info(f"Average communications per node: {round_communications/num_models:.2f}")
         
-        return updated_models
+        logging.info(f"\n{'='*50}")
+        logging.info(f"Decentralized Learning Complete")
+        logging.info(f"Total rounds: {num_rounds}")
+        logging.info(f"Final topology: {self.topology_type}")
+        logging.info(f"{'='*50}\n")
+        
+        # Convert back to the original format with sample counts
+        return [(model, local_models[i][1], local_models[i][2]) for i, model in enumerate(updated_models)]
 
     def create_dev_dataset(self, dataset):
         """
@@ -183,61 +241,6 @@ class GlobalAggregator(object):
                 / sum([alpha for w, alpha in update_weights])
                 
         self.model.load_state_dict(avg_weights)
-    
-    # def fed_mse_avg(self, local_models):
-    #     update_weights = []
-    #     weighted = []
-    #     total_samples = sum(model[2] for model in local_models)
-
-    #     for i, local_model in zip(tqdm(range(len(local_models)), desc='Calculating similarity...'), local_models):
-    #         self.model.load_state_dict(local_model[0])
-    #         self.model.eval()
-    #         with torch.no_grad():
-    #             _, generated_data, _ = self.model(torch.Tensor(self.dev_dataset).to(self.device))
-    #             sim_score = torch.nn.MSELoss(reduction='mean')(torch.Tensor(self.dev_dataset).to(self.device), generated_data)  # Calculate similarity score
-    #             weight = (1 / sim_score) * (local_model[2] / total_samples)  # Combine MSE and number of samples
-    #             weighted.append(weight)
-    #             update_weights.append((local_model[0], weight))
-
-    #     avg_weights = {}
-    #     for key in update_weights[0][0].keys():
-    #         avg_weights[key] = sum([w[key] * alpha for w, alpha in update_weights]) \
-    #             / sum([alpha for w, alpha in update_weights])
-
-    #     self.model.load_state_dict(avg_weights)
-    
-    
-    # def fed_mse_avg(self, local_models):
-    #     update_weights = []
-    #     mse_weights = []
-    #     total_samples = sum(model[2] for model in local_models)
-
-    #     for i, local_model in zip(tqdm(range(len(local_models)), desc='Calculating similarity...'), local_models):
-    #         self.model.load_state_dict(local_model[0])
-    #         self.model.eval()
-    #         with torch.no_grad():
-    #             _, generated_data, _ = self.model(torch.Tensor(self.dev_dataset).to(self.device))
-    #             sim_score = torch.nn.MSELoss(reduction='mean')(torch.Tensor(self.dev_dataset).to(self.device), generated_data)  # Calculate similarity score
-    #             mse_weight = 1 / sim_score  # Lower MSE should have higher weight
-    #             mse_weights.append(mse_weight)
-    #             update_weights.append((local_model[0], mse_weight, local_model[2]))
-
-    #     # Normalize MSE weights
-    #     mse_weights_sum = sum(mse_weights)
-    #     normalized_mse_weights = [weight / mse_weights_sum for weight in mse_weights]
-
-    #     # Calculate combined weights
-    #     combined_weights = []
-    #     for (local_model, normalized_mse_weight, num_samples) in zip(local_models, normalized_mse_weights, [model[2] for model in local_models]):
-    #         combined_weight = normalized_mse_weight * (num_samples / total_samples)
-    #         combined_weights.append(combined_weight)
-
-    #     # Aggregate the global model using the combined weights
-    #     avg_weights = {}
-    #     for key in update_weights[0][0].keys():
-    #         avg_weights[key] = sum(w[key] * weight for w, weight in zip([uw[0] for uw in update_weights], combined_weights))
-
-    #     self.model.load_state_dict(avg_weights)
     
     def fed_avg(self, local_models=None):
         """
@@ -337,3 +340,5 @@ class GlobalAggregator(object):
             self.val_loss = val_loss.item()
     
     
+
+

@@ -16,6 +16,7 @@ from DataLoader import IoTDataProccessor
 import networkx as nx
 import random
 import logging
+from .client_trainer import ClientTrainer
 
 # Configure the logging module
 logging.basicConfig(level=logging.INFO,
@@ -311,6 +312,90 @@ class GlobalAggregator(object):
         # Load the averaged weights into the global model
         self.model.load_state_dict(avg_weights)
     
+    def combined_update(self, local_models):
+        """
+        Combines FedProx, MSE-based weighting, and decentralized learning
+        """
+        # Step 1: Local training with FedProx
+        for client in local_models:
+            client_trainer = ClientTrainer(
+                model=client[0],
+                update_type="fedprox",
+                fedprox_mu=0.01  # Using default FedProx mu
+            )
+            client_trainer.run(client[1], client[2])
+        
+        # Step 2: Calculate MSE-based weights
+        mse_scores = []
+        for client in local_models:
+            model = client[0]  # Get the model from the tuple
+            model.eval()
+            with torch.no_grad():
+                _, generated_data, _ = model(torch.Tensor(self.dev_dataset).to(self.device))
+                mse_score = torch.nn.MSELoss(reduction='mean')(
+                    torch.Tensor(self.dev_dataset).to(self.device), 
+                    generated_data
+                )
+                mse_scores.append(1/mse_score)
+        
+        # Step 3: Decentralized aggregation with MSE weights
+        if self.update_type == "decentralized":
+            # Create network topology
+            G = self._create_topology()
+            
+            # Select aggregator through voting
+            aggregator_idx = select_aggregator([client[0] for client in local_models], 
+                                             [{"train_loader": client[1]} for client in local_models], 
+                                             self.device, G)
+            
+            # Aggregate models using MSE weights
+            for i in range(len(local_models)):
+                if i == aggregator_idx:
+                    # Aggregator node aggregates with neighbors
+                    neighbors = list(G.neighbors(i))
+                    if not neighbors:
+                        continue
+                    
+                    # Use MSE weights for aggregation
+                    neighbor_models = [local_models[neighbor][0] for neighbor in neighbors]
+                    neighbor_models.append(local_models[i][0])
+                    
+                    neighbor_scores = [mse_scores[neighbor] for neighbor in neighbors]
+                    neighbor_scores.append(mse_scores[i])
+                    
+                    # Normalize weights
+                    weights = [score/sum(neighbor_scores) for score in neighbor_scores]
+                    
+                    # Aggregate
+                    avg_weights = {}
+                    for key in neighbor_models[0].state_dict().keys():
+                        avg_weights[key] = sum(
+                            model.state_dict()[key] * weight 
+                            for model, weight in zip(neighbor_models, weights)
+                        )
+                    
+                    local_models[i][0].load_state_dict(avg_weights)
+                else:
+                    # Non-aggregator nodes aggregate with aggregator
+                    aggregator_model = local_models[aggregator_idx][0]
+                    own_model = local_models[i][0]
+                    
+                    # Use MSE weights
+                    own_weight = mse_scores[i] / (mse_scores[i] + mse_scores[aggregator_idx])
+                    aggregator_weight = mse_scores[aggregator_idx] / (mse_scores[i] + mse_scores[aggregator_idx])
+                    
+                    # Aggregate
+                    avg_weights = {}
+                    for key in own_model.state_dict().keys():
+                        avg_weights[key] = (
+                            own_model.state_dict()[key] * own_weight + 
+                            aggregator_model.state_dict()[key] * aggregator_weight
+                        )
+                    
+                    local_models[i][0].load_state_dict(avg_weights)
+        
+        return local_models
+
     def update(self, local_models=None):
         """
         Update the global model using the local models.

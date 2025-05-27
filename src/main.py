@@ -232,7 +232,7 @@ if __name__ == "__main__":
                 "test_dataset": (processed_test_data, test_label),
                 "dev_normal_dataset": dev_normal_data
             })
-        for update_type in ["avg", "fedprox", "mse_avg", "decentralized"]:
+        for update_type in ["avg", "fedprox", "mse_avg", "decentralized", "combined"]:
         # for update_type in ["fedprox"]:
         # for update_type in ["mse_avg"]:
             # for model_type in ["autoencoder"]:
@@ -305,7 +305,7 @@ if __name__ == "__main__":
                             client_latent = {}
                             
                             # Create network topology
-                            if update_type == "decentralized":
+                            if update_type == "decentralized" or update_type == "combined":
                                 if topology_type == "ring":
                                     G = nx.Graph()
                                     for i in range(len(client_info)):
@@ -359,7 +359,34 @@ if __name__ == "__main__":
                             for round in range(num_rounds):
                                 client_latent[round] = {}
                                 
-                                if update_type == "decentralized":
+                                if update_type == "combined":
+                                    logging.info(f"\n{'='*50}")
+                                    logging.info(f"Round {round+1}/{num_rounds}")
+                                    logging.info(f"Using Combined Approach (FedProx + MSE + Decentralized)")
+                                    
+                                    # Prepare client models for combined update
+                                    selected_idx = random.sample([i for i in range(len(client_info))], int(num_participants*len(client_info)))
+                                    selected_clients = [client_info[i] for i in selected_idx]
+                                    
+                                    client_weights = []
+                                    for i, client in enumerate(selected_clients):
+                                        client_weights.append((
+                                            copy.deepcopy(client_models[i]),
+                                            client["train_loader"],
+                                            client["valid_loader"]
+                                        ))
+                                    
+                                    # Perform combined update
+                                    updated_models = global_aggregator.combined_update(client_weights)
+                                    
+                                    # Update client models
+                                    for i, model in enumerate(updated_models):
+                                        client_models[selected_idx[i]] = model[0]
+                                    
+                                    # Use the last model as global model
+                                    global_aggregator.model = client_models[-1]
+                                    
+                                elif update_type == "decentralized":
                                     logging.info(f"\n{'='*50}")
                                     logging.info(f"Round {round+1}/{num_rounds}")
                                     logging.info(f"Network Communication Pattern:")
@@ -377,6 +404,15 @@ if __name__ == "__main__":
                                     aggregator_idx = select_aggregator(client_models, client_info, device_trainer.device, G)
                                     logging.info(f"Selected {client_info[aggregator_idx]['device']} as aggregator for round {round+1}")
                                     
+                                    # Calculate MSE scores for all models using dev_dataset
+                                    mse_scores = []
+                                    for i, model in enumerate(client_models):
+                                        model.eval()
+                                        with torch.no_grad():
+                                            _, generated_data, _ = model(torch.Tensor(global_aggregator.dev_dataset).to(device_trainer.device))
+                                            sim_score = torch.nn.MSELoss(reduction='mean')(torch.Tensor(global_aggregator.dev_dataset).to(device_trainer.device), generated_data)
+                                            mse_scores.append(1/sim_score)  # Lower MSE = higher weight
+                                    
                                     # All nodes aggregate with the voted aggregator
                                     for i in range(len(client_info)):
                                         if i == aggregator_idx:
@@ -389,12 +425,13 @@ if __name__ == "__main__":
                                             neighbor_models = [client_models[neighbor] for neighbor in neighbors]
                                             neighbor_models.append(client_models[i])  # Include own model
                                             
-                                            # Calculate weights based on number of samples
-                                            total_samples = sum(len(client_info[j]["train_loader"].dataset) for j in neighbors + [i])
-                                            weights = [len(client_info[j]["train_loader"].dataset) / total_samples for j in neighbors + [i]]
+                                            # Calculate weights based on MSE scores
+                                            neighbor_scores = [mse_scores[neighbor] for neighbor in neighbors]
+                                            neighbor_scores.append(mse_scores[i])  # Include own score
                                             
                                             # Give aggregator higher weight
-                                            weights = [w * 1.5 if j == i else w * 0.9 for j, w in enumerate(weights)]
+                                            weights = [score * 1.5 if j == i else score * 0.9 
+                                                     for j, score in enumerate(neighbor_scores)]
                                             weights = [w / sum(weights) for w in weights]  # Renormalize
                                             
                                             # Aggregate models
@@ -406,15 +443,24 @@ if __name__ == "__main__":
                                             # Update aggregator's model
                                             client_models[i].load_state_dict(avg_weights)
                                             logging.info(f"Aggregator {client_info[i]['device']} aggregated with neighbors: {[client_info[j]['device'] for j in neighbors]}")
+                                            logging.info(f"Neighbor weights: {dict(zip([client_info[j]['device'] for j in neighbors + [i]], weights))}")
                                         else:
                                             # Non-aggregator nodes aggregate with the aggregator
                                             aggregator_model = client_models[aggregator_idx]
                                             own_model = client_models[i]
                                             
-                                            # Calculate weights (give aggregator higher weight)
-                                            total_samples = len(client_info[i]["train_loader"].dataset) + len(client_info[aggregator_idx]["train_loader"].dataset)
-                                            own_weight = len(client_info[i]["train_loader"].dataset) / total_samples * 0.4  # Reduce own weight
-                                            aggregator_weight = len(client_info[aggregator_idx]["train_loader"].dataset) / total_samples * 1.6  # Increase aggregator weight
+                                            # Calculate weights based on MSE scores
+                                            own_score = mse_scores[i]
+                                            aggregator_score = mse_scores[aggregator_idx]
+                                            
+                                            # Give aggregator higher weight
+                                            own_weight = own_score * 0.4  # Reduce own weight
+                                            aggregator_weight = aggregator_score * 1.6  # Increase aggregator weight
+                                            
+                                            # Normalize weights
+                                            total_weight = own_weight + aggregator_weight
+                                            own_weight = own_weight / total_weight
+                                            aggregator_weight = aggregator_weight / total_weight
                                             
                                             # Aggregate models
                                             avg_weights = {}
@@ -425,6 +471,7 @@ if __name__ == "__main__":
                                             # Update node's model
                                             client_models[i].load_state_dict(avg_weights)
                                             logging.info(f"Node {client_info[i]['device']} aggregated with aggregator {client_info[aggregator_idx]['device']}")
+                                            logging.info(f"Weights - Own: {own_weight:.3f}, Aggregator: {aggregator_weight:.3f}")
                                     
                                     # Use the aggregator's model for evaluation
                                     global_aggregator.model = client_models[aggregator_idx]

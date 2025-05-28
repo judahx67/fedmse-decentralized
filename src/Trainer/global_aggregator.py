@@ -13,8 +13,8 @@ from sklearn.neighbors import KernelDensity
 from tqdm import tqdm
 from Utils import similarity_score
 from DataLoader import IoTDataProccessor
-
 import logging
+import copy
 
 # Configure the logging module
 logging.basicConfig(level=logging.INFO,  # Set the logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
@@ -23,13 +23,96 @@ logging.basicConfig(level=logging.INFO,  # Set the logging level (DEBUG, INFO, W
 class GlobalAggregator(object):
     def __init__(self, model, update_type="avg"):
         """
-            - initialize the SAE model in global: the model architecture: input-dim, 
-                output-dim, latent-dim
-            - 
+        Initialize the global aggregator.
+        
+        Args:
+            model: The model architecture to use
+            update_type (str): Type of update mechanism to use
         """
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.update_type = update_type
         self.model = model.to(self.device)
+        self.aggregation_history = {}  # Track aggregation history for each client
+    
+    def select_aggregator(self, clients, validation_data):
+        """
+        Select the best client to perform aggregation based on voting.
+        
+        Args:
+            clients (list): List of ClientTrainer instances
+            validation_data (torch.Tensor): Validation data for MSE calculation
+            
+        Returns:
+            ClientTrainer: Selected aggregator client
+        """
+        logging.info("Starting aggregator selection process...")
+        
+        # Reset votes for this round
+        for client in clients:
+            client.votes_received = 0
+        
+        # Each client votes for the best aggregator
+        for i, client in enumerate(clients):
+            logging.info(f"Client {i+1} is voting...")
+            selected_aggregator = client.vote_for_aggregator(clients, validation_data)
+            if selected_aggregator:
+                self.aggregation_history[selected_aggregator] = self.aggregation_history.get(selected_aggregator, 0) + 1
+                logging.info(f"Client {i+1} voted for aggregator with MSE score: {selected_aggregator.mse_score:.4f}")
+        
+        # Select client with most votes that hasn't exceeded threshold
+        best_client = None
+        max_votes = -1
+        
+        for i, client in enumerate(clients):
+            logging.info(f"Client {i+1} received {client.votes_received} votes and has been aggregator {client.aggregation_count} times")
+            if (client.votes_received > max_votes and 
+                client.aggregation_count < client.max_aggregation_threshold):
+                max_votes = client.votes_received
+                best_client = client
+        
+        if best_client:
+            logging.info(f"Selected aggregator with {max_votes} votes and MSE score: {best_client.mse_score:.4f}")
+        else:
+            logging.warning("No suitable aggregator found")
+        
+        return best_client
+    
+    def update(self, clients, validation_data):
+        """
+        Update the global model using decentralized aggregation.
+        
+        Args:
+            clients (list): List of ClientTrainer instances
+            validation_data (torch.Tensor): Validation data for MSE calculation
+            
+        Returns:
+            bool: True if update was successful, False otherwise
+        """
+        logging.info("Starting decentralized model update...")
+        
+        # Select aggregator
+        aggregator = self.select_aggregator(clients, validation_data)
+        if not aggregator:
+            logging.warning("No suitable aggregator found")
+            return False
+        
+        logging.info("Performing model aggregation...")
+        # Perform aggregation
+        aggregated_state = aggregator.aggregate_models(clients, validation_data)
+        if aggregated_state is None:
+            logging.warning("Aggregation failed")
+            return False
+        
+        # Update global model
+        self.model.load_state_dict(aggregated_state)
+        
+        # Update all clients with new global model
+        for client in clients:
+            client.model.load_state_dict(aggregated_state)
+            client.previous_global_model = copy.deepcopy(client.model)
+        
+        logging.info("Model update completed successfully")
+        return True
     
     def create_dev_dataset(self, dataset):
         """
@@ -106,61 +189,6 @@ class GlobalAggregator(object):
                 
         self.model.load_state_dict(avg_weights)
     
-    # def fed_mse_avg(self, local_models):
-    #     update_weights = []
-    #     weighted = []
-    #     total_samples = sum(model[2] for model in local_models)
-
-    #     for i, local_model in zip(tqdm(range(len(local_models)), desc='Calculating similarity...'), local_models):
-    #         self.model.load_state_dict(local_model[0])
-    #         self.model.eval()
-    #         with torch.no_grad():
-    #             _, generated_data, _ = self.model(torch.Tensor(self.dev_dataset).to(self.device))
-    #             sim_score = torch.nn.MSELoss(reduction='mean')(torch.Tensor(self.dev_dataset).to(self.device), generated_data)  # Calculate similarity score
-    #             weight = (1 / sim_score) * (local_model[2] / total_samples)  # Combine MSE and number of samples
-    #             weighted.append(weight)
-    #             update_weights.append((local_model[0], weight))
-
-    #     avg_weights = {}
-    #     for key in update_weights[0][0].keys():
-    #         avg_weights[key] = sum([w[key] * alpha for w, alpha in update_weights]) \
-    #             / sum([alpha for w, alpha in update_weights])
-
-    #     self.model.load_state_dict(avg_weights)
-    
-    
-    # def fed_mse_avg(self, local_models):
-    #     update_weights = []
-    #     mse_weights = []
-    #     total_samples = sum(model[2] for model in local_models)
-
-    #     for i, local_model in zip(tqdm(range(len(local_models)), desc='Calculating similarity...'), local_models):
-    #         self.model.load_state_dict(local_model[0])
-    #         self.model.eval()
-    #         with torch.no_grad():
-    #             _, generated_data, _ = self.model(torch.Tensor(self.dev_dataset).to(self.device))
-    #             sim_score = torch.nn.MSELoss(reduction='mean')(torch.Tensor(self.dev_dataset).to(self.device), generated_data)  # Calculate similarity score
-    #             mse_weight = 1 / sim_score  # Lower MSE should have higher weight
-    #             mse_weights.append(mse_weight)
-    #             update_weights.append((local_model[0], mse_weight, local_model[2]))
-
-    #     # Normalize MSE weights
-    #     mse_weights_sum = sum(mse_weights)
-    #     normalized_mse_weights = [weight / mse_weights_sum for weight in mse_weights]
-
-    #     # Calculate combined weights
-    #     combined_weights = []
-    #     for (local_model, normalized_mse_weight, num_samples) in zip(local_models, normalized_mse_weights, [model[2] for model in local_models]):
-    #         combined_weight = normalized_mse_weight * (num_samples / total_samples)
-    #         combined_weights.append(combined_weight)
-
-    #     # Aggregate the global model using the combined weights
-    #     avg_weights = {}
-    #     for key in update_weights[0][0].keys():
-    #         avg_weights[key] = sum(w[key] * weight for w, weight in zip([uw[0] for uw in update_weights], combined_weights))
-
-    #     self.model.load_state_dict(avg_weights)
-    
     def fed_avg(self, local_models=None):
         """
         Perform federated averaging to aggregate the weights of local models.
@@ -229,29 +257,4 @@ class GlobalAggregator(object):
 
         # Load the averaged weights into the global model
         self.model.load_state_dict(avg_weights)
-    
-    def update(self, local_models=None):
-        """
-        Update the global model using the local models.
-
-        Args:
-            local_models (list): List of local models to be used for updating the global model.
-
-        Returns:
-            None
-        """
-        if self.update_type == "avg":
-            self.fed_avg(local_models)
-        if self.update_type == "fusion_avg":
-            self.fusion_avg(local_models)
-        if self.update_type == "mse_avg":
-            self.fed_mse_avg(local_models)
-        if self.update_type == "fedprox":
-            self.fedprox(local_models, mu=0.01)
-        
-        self.model.eval()
-        with torch.no_grad():
-            _, _, val_loss = self.model(torch.Tensor(self.dev_dataset).to(self.device))
-            self.val_loss = val_loss.item()
-    
     

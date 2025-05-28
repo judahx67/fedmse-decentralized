@@ -12,6 +12,8 @@ from torch import nn
 import pickle
 import os
 import copy
+import numpy as np
+from collections import defaultdict
 
 import logging
 
@@ -54,13 +56,98 @@ class ClientTrainer(object):
         self.optimizer = optimizer(self.model.parameters(), lr=self.lr_rate)
         self.epoch = epoch
         self.batch_size = batch_size
-        # self.lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=0.9, \
-        #     last_epoch=-1, verbose=False)
         self.patience = patience
         self.save_dir = save_dir
         self.update_type = update_type
         self.fedprox_mu = fedprox_mu
+        
+        # New attributes for aggregation
+        self.aggregation_count = 0  # Track how many times this client has been selected as aggregator
+        self.max_aggregation_threshold = 3  # Maximum times a client can be selected as aggregator
+        self.mse_score = float('inf')  # MSE score for voting
+        self.votes_received = 0  # Number of votes received from other clients
     
+    def calculate_mse_score(self, validation_data):
+        """
+        Calculate MSE score for voting mechanism.
+        
+        Args:
+            validation_data (torch.Tensor): Validation data to calculate MSE on.
+            
+        Returns:
+            float: MSE score
+        """
+        self.model.eval()
+        with torch.no_grad():
+            _, generated_data, _ = self.model(validation_data.to(self.device))
+            mse = torch.nn.MSELoss(reduction='mean')(validation_data.to(self.device), generated_data)
+            self.mse_score = mse.item()
+            return self.mse_score
+    
+    def vote_for_aggregator(self, clients, validation_data):
+        """
+        Vote for the best aggregator based on MSE scores.
+        
+        Args:
+            clients (list): List of ClientTrainer instances
+            validation_data (torch.Tensor): Validation data to calculate MSE on
+            
+        Returns:
+            ClientTrainer: Selected aggregator
+        """
+        # Calculate MSE scores for all clients
+        mse_scores = []
+        for client in clients:
+            if client != self:  # Don't vote for self
+                mse_score = client.calculate_mse_score(validation_data)
+                mse_scores.append((client, mse_score))
+        
+        # Sort by MSE score (lower is better)
+        mse_scores.sort(key=lambda x: x[1])
+        
+        # Vote for the client with lowest MSE that hasn't exceeded aggregation threshold
+        for client, _ in mse_scores:
+            if client.aggregation_count < client.max_aggregation_threshold:
+                client.votes_received += 1
+                return client
+        
+        return None
+    
+    def aggregate_models(self, clients, validation_data):
+        """
+        Aggregate models from all clients using MSE-based weights.
+        
+        Args:
+            clients (list): List of ClientTrainer instances
+            validation_data (torch.Tensor): Validation data to calculate MSE on
+            
+        Returns:
+            dict: Aggregated model state dict
+        """
+        if self.aggregation_count >= self.max_aggregation_threshold:
+            logging.warning("This client has exceeded maximum aggregation threshold")
+            return None
+            
+        # Calculate MSE scores and weights for all clients
+        weights = []
+        total_weight = 0
+        
+        for client in clients:
+            mse_score = client.calculate_mse_score(validation_data)
+            weight = 1.0 / (mse_score + 1e-10)  # Add small epsilon to avoid division by zero
+            weights.append((client.model.state_dict(), weight))
+            total_weight += weight
+        
+        # Normalize weights
+        weights = [(state_dict, weight/total_weight) for state_dict, weight in weights]
+        
+        # Aggregate models
+        aggregated_state = {}
+        for key in weights[0][0].keys():
+            aggregated_state[key] = sum(state_dict[key] * weight for state_dict, weight in weights)
+        
+        self.aggregation_count += 1
+        return aggregated_state
     
     def save_model(self):
         """

@@ -183,7 +183,6 @@ if __name__ == "__main__":
                 "test_dataset": (processed_test_data, test_label),
                 "dev_normal_dataset": dev_normal_data
             })
-        
         # Initialize global aggregator
         if model_type == "hybrid":
             global_model = Shrink_Autoencoder(input_dim=dim_features,

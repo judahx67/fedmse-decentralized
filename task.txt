@@ -1,7 +1,7 @@
 Implementation Plan for Decentralized Federated Learning System
 
 1. Code Restructuring and Decentralization
-   - Move model aggregation logic from global to client classes
+   - Move model aggregation logic from global to client classes (named global_aggregator.py and client_trainer.py)
    - Create/update client class to include aggregation functionality
    - Modify main.py to:
      * Remove global aggregation code
@@ -20,10 +20,7 @@ Implementation Plan for Decentralized Federated Learning System
    - Implement rotation system for aggregator selection
    - Add tracking mechanism to monitor aggregator selection frequency
    - Set maximum threshold for how often a client can be selected as aggregator
-   - Consider implementing:
-     * Time-based rotation
-     * Performance-based rotation
-     * Random selection with weighted probabilities
+
 
 4. Implementation Steps
    a. Code Migration Phase

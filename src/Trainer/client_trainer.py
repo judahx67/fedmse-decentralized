@@ -68,7 +68,7 @@ class ClientTrainer(object):
         self.votes_received = 0  # Number of votes received from other clients
         self.current_round = -1  # Track current round
         self.has_aggregated_this_round = False  # Flag to track if aggregation has been performed in current round
-    
+
     def calculate_mse_score(self, validation_data):
         """
         Calculate MSE score for voting mechanism.
@@ -104,12 +104,12 @@ class ClientTrainer(object):
         # Calculate average MSE across all batches
         avg_mse = total_mse / num_batches if num_batches > 0 else float('inf')
         
-        # Add a small random component to break ties (0.1% variation)
-        random_factor = 1.0 + (torch.rand(1).item() - 0.5) * 0.002
+        # Add a very small random component to break ties (0.01% variation)
+        random_factor = 1.0 + (torch.rand(1).item() - 0.5) * 0.0002
         self.mse_score = avg_mse * random_factor
         
         return self.mse_score
-    
+
     def vote_for_aggregator(self, clients, validation_data, current_round):
         """
         Vote for the best aggregator based on MSE scores.
@@ -130,11 +130,11 @@ class ClientTrainer(object):
         
         # Calculate MSE scores for all clients
         mse_scores = []
-        for client in clients:
+        for i, client in enumerate(clients, 1):
             if client != self:  # Don't vote for self
                 mse_score = client.calculate_mse_score(validation_data)
                 mse_scores.append((client, mse_score))
-                logging.info(f"Client MSE score: {mse_score:.4f}")
+                logging.info(f"Client {i} MSE score: {mse_score:.6f}")
         
         # Sort by MSE score (lower is better)
         mse_scores.sort(key=lambda x: x[1])
@@ -144,7 +144,8 @@ class ClientTrainer(object):
             if (client.aggregation_count < client.max_aggregation_threshold and 
                 not client.has_aggregated_this_round):
                 client.votes_received += 1
-                logging.info(f"Voting for client with MSE score: {mse_score:.4f}")
+                client_index = clients.index(client) + 1
+                logging.info(f"Voting for Client {client_index} with MSE score: {mse_score:.6f}")
                 return client
         
         return None

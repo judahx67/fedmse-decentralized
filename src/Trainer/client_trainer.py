@@ -77,14 +77,38 @@ class ClientTrainer(object):
             validation_data (torch.Tensor): Validation data to calculate MSE on.
             
         Returns:
-            float: MSE score
+            float: Normalized MSE score
         """
         self.model.eval()
+        
+        # Normalize validation data
+        mean = validation_data.mean(dim=0, keepdim=True)
+        std = validation_data.std(dim=0, keepdim=True) + 1e-8  # Add small epsilon to avoid division by zero
+        normalized_data = (validation_data - mean) / std
+        
+        # Process in batches to handle large datasets
+        batch_size = 128
+        total_mse = 0
+        num_batches = 0
+        
         with torch.no_grad():
-            _, generated_data, _ = self.model(validation_data.to(self.device))
-            mse = torch.nn.MSELoss(reduction='mean')(validation_data.to(self.device), generated_data)
-            self.mse_score = mse.item()
-            return self.mse_score
+            for i in range(0, len(normalized_data), batch_size):
+                batch = normalized_data[i:i + batch_size].to(self.device)
+                _, generated_data, _ = self.model(batch)
+                
+                # Calculate MSE for this batch
+                batch_mse = torch.nn.MSELoss(reduction='mean')(batch, generated_data)
+                total_mse += batch_mse.item()
+                num_batches += 1
+        
+        # Calculate average MSE across all batches
+        avg_mse = total_mse / num_batches if num_batches > 0 else float('inf')
+        
+        # Add a small random component to break ties (0.1% variation)
+        random_factor = 1.0 + (torch.rand(1).item() - 0.5) * 0.002
+        self.mse_score = avg_mse * random_factor
+        
+        return self.mse_score
     
     def vote_for_aggregator(self, clients, validation_data, current_round):
         """

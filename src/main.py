@@ -35,10 +35,10 @@ logging.basicConfig(level=logging.INFO,  # Set the logging level (DEBUG, INFO, W
 
 
 num_participants = 0.5
-epoch = 1 #5 #100
-num_rounds = 1 #5 #20
-lr_rate = 1e-5
-shrink_lambda = 1 #5 #10
+epoch = 5 #5 #100
+num_rounds = 5 #5 #20
+lr_rate = 1e-3
+shrink_lambda = 5 #5 #10
 network_size = 10 #50
 data_seed = 1234
 no_Exp = f"nonIID_Exp1_Rerun_{epoch}epoch_10client_lr0001_lamda{shrink_lambda}_ratio{num_participants*100}"
@@ -59,7 +59,7 @@ dim_features = 115   #nba-iot: 115; cic-2023: 46
 scen_name = 'FL-IoT' 
 
 #config_file = f"Configuration/scen2-nba-iot-50clients.json"
-config_file = "Configuration/scen2-nba-iot-10clients.json"
+config_file = "Configuration/scen2-nba-iot-10clients_noniid.json"
 # config_file = "Configuration/cic-config.json"
 
 def set_seeds(seed):

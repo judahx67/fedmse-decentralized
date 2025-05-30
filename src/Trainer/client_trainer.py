@@ -101,14 +101,16 @@ class ClientTrainer(object):
             if client != self:  # Don't vote for self
                 mse_score = client.calculate_mse_score(validation_data)
                 mse_scores.append((client, mse_score))
+                logging.info(f"Client MSE score: {mse_score:.4f}")
         
         # Sort by MSE score (lower is better)
         mse_scores.sort(key=lambda x: x[1])
         
         # Vote for the client with lowest MSE that hasn't exceeded aggregation threshold
-        for client, _ in mse_scores:
+        for client, mse_score in mse_scores:
             if client.aggregation_count < client.max_aggregation_threshold:
                 client.votes_received += 1
+                logging.info(f"Voting for client with MSE score: {mse_score:.4f}")
                 return client
         
         return None

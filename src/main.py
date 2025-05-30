@@ -181,7 +181,9 @@ if __name__ == "__main__":
                 "valid_loader": valid_loader,
                 "test_loader": test_loader,
                 "test_dataset": (processed_test_data, test_label),
-                "dev_normal_dataset": dev_normal_data
+                "dev_normal_dataset": dev_normal_data,
+                "save_dir": os.path.join(f"Checkpoint/{network_size}/{no_Exp}/{run}/ClientModel", 
+                                    scen_name, model_type, update_type, device_name)
             })
         # Initialize global aggregator
         if model_type == "hybrid":
@@ -199,20 +201,29 @@ if __name__ == "__main__":
             logging.info(f"Starting round {round + 1}/{num_rounds}")
             
             # Train clients
-            for client, info in zip(clients, client_info):
-                client.run(info["train_loader"], info["valid_loader"])
+            client_weights = []
+            total_training_samples = sum(len(client_info[i]["train_loader"].dataset) for i in range(len(clients)))
+            for i, client in enumerate(clients):
+                logging.info("Training local model...")
+                device_trainer = ClientTrainer(model=global_aggregator.model, \
+                    save_dir=client_info[i]['save_dir'], epoch=epoch, update_type=update_type, lr_rate=lr_rate)
+                device_trainer.run(client_info[i]["train_loader"], client_info[i]["valid_loader"])
+                client_weights.append((copy.deepcopy(device_trainer.model.state_dict()), total_training_samples, len(client_info[i]["train_loader"].dataset)))
+                logging.info(f"Client {i} training done!")
+                
+            logging.info(f"Round {round+1}/{num_rounds} - Updating global model")
             
             # Get validation data for aggregation
             validation_data = torch.Tensor(processed_valid_data)
             
             # Update global model using decentralized aggregation
-            success = global_aggregator.update(clients, validation_data)
-            if not success:
-                logging.warning(f"Global model update failed in round {round + 1}")
-                continue
+            global_aggregator.update(clients=clients, validation_data=validation_data, current_round=round)
+
+            logging.info(f"Round {round+1}/{num_rounds} - Updated global model - \
+                Global loss: {global_aggregator.val_loss}")
             
             # Evaluate global model
-            evaluator = Evaluator(global_model)
+            evaluator = Evaluator(global_aggregator.model)
             metrics = evaluator.evaluate(test_loader)
             logging.info(f"Round {round + 1} metrics: {metrics}")
             

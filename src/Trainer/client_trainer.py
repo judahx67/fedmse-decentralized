@@ -66,6 +66,8 @@ class ClientTrainer(object):
         self.max_aggregation_threshold = 3  # Maximum times a client can be selected as aggregator
         self.mse_score = float('inf')  # MSE score for voting
         self.votes_received = 0  # Number of votes received from other clients
+        self.current_round = -1  # Track current round
+        self.has_aggregated_this_round = False  # Flag to track if aggregation has been performed in current round
     
     def calculate_mse_score(self, validation_data):
         """
@@ -84,17 +86,24 @@ class ClientTrainer(object):
             self.mse_score = mse.item()
             return self.mse_score
     
-    def vote_for_aggregator(self, clients, validation_data):
+    def vote_for_aggregator(self, clients, validation_data, current_round):
         """
         Vote for the best aggregator based on MSE scores.
         
         Args:
             clients (list): List of ClientTrainer instances
             validation_data (torch.Tensor): Validation data to calculate MSE on
+            current_round (int): Current round number
             
         Returns:
             ClientTrainer: Selected aggregator
         """
+        # Reset votes for new round
+        if current_round != self.current_round:
+            self.current_round = current_round
+            self.has_aggregated_this_round = False
+            self.votes_received = 0
+        
         # Calculate MSE scores for all clients
         mse_scores = []
         for client in clients:
@@ -108,26 +117,31 @@ class ClientTrainer(object):
         
         # Vote for the client with lowest MSE that hasn't exceeded aggregation threshold
         for client, mse_score in mse_scores:
-            if client.aggregation_count < client.max_aggregation_threshold:
+            if (client.aggregation_count < client.max_aggregation_threshold and 
+                not client.has_aggregated_this_round):
                 client.votes_received += 1
                 logging.info(f"Voting for client with MSE score: {mse_score:.4f}")
                 return client
         
         return None
     
-    def aggregate_models(self, clients, validation_data):
+    def aggregate_models(self, clients, validation_data, current_round):
         """
         Aggregate models from all clients using MSE-based weights.
         
         Args:
             clients (list): List of ClientTrainer instances
             validation_data (torch.Tensor): Validation data to calculate MSE on
+            current_round (int): Current round number
             
         Returns:
             dict: Aggregated model state dict
         """
-        if self.aggregation_count >= self.max_aggregation_threshold:
-            logging.warning("This client has exceeded maximum aggregation threshold")
+        # Check if this client should perform aggregation
+        if (self.aggregation_count >= self.max_aggregation_threshold or 
+            self.has_aggregated_this_round or 
+            current_round != self.current_round):
+            logging.warning("This client cannot perform aggregation in this round")
             return None
             
         # Calculate MSE scores and weights for all clients
@@ -149,6 +163,7 @@ class ClientTrainer(object):
             aggregated_state[key] = sum(state_dict[key] * weight for state_dict, weight in weights)
         
         self.aggregation_count += 1
+        self.has_aggregated_this_round = True
         return aggregated_state
     
     def save_model(self):

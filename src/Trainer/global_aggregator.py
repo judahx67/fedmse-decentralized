@@ -33,19 +33,21 @@ class GlobalAggregator(object):
         self.update_type = update_type
         self.model = model.to(self.device)
         self.aggregation_history = {}  # Track aggregation history for each client
+        self.current_round = -1  # Track current round
     
-    def select_aggregator(self, clients, validation_data):
+    def select_aggregator(self, clients, validation_data, current_round):
         """
         Select the best client to perform aggregation based on voting.
         
         Args:
             clients (list): List of ClientTrainer instances
             validation_data (torch.Tensor): Validation data for MSE calculation
+            current_round (int): Current round number
             
         Returns:
             ClientTrainer: Selected aggregator client
         """
-        logging.info("Starting aggregator selection process...")
+        logging.info(f"Starting aggregator selection process for round {current_round}...")
         
         # Reset votes for this round
         for client in clients:
@@ -54,7 +56,7 @@ class GlobalAggregator(object):
         # Each client votes for the best aggregator
         for i, client in enumerate(clients):
             logging.info(f"Client {i+1} is voting...")
-            selected_aggregator = client.vote_for_aggregator(clients, validation_data)
+            selected_aggregator = client.vote_for_aggregator(clients, validation_data, current_round)
             if selected_aggregator:
                 self.aggregation_history[selected_aggregator] = self.aggregation_history.get(selected_aggregator, 0) + 1
                 logging.info(f"Client {i+1} voted for aggregator with MSE score: {selected_aggregator.mse_score:.4f}")
@@ -66,7 +68,8 @@ class GlobalAggregator(object):
         for i, client in enumerate(clients):
             logging.info(f"Client {i+1} received {client.votes_received} votes and has been aggregator {client.aggregation_count} times")
             if (client.votes_received > max_votes and 
-                client.aggregation_count < client.max_aggregation_threshold):
+                client.aggregation_count < client.max_aggregation_threshold and
+                not client.has_aggregated_this_round):
                 max_votes = client.votes_received
                 best_client = client
         
@@ -77,28 +80,34 @@ class GlobalAggregator(object):
         
         return best_client
     
-    def update(self, clients, validation_data):
+    def update(self, clients, validation_data, current_round):
         """
         Update the global model using decentralized aggregation.
         
         Args:
             clients (list): List of ClientTrainer instances
             validation_data (torch.Tensor): Validation data for MSE calculation
+            current_round (int): Current round number
             
         Returns:
             bool: True if update was successful, False otherwise
         """
-        logging.info("Starting decentralized model update...")
+        if current_round == self.current_round:
+            logging.warning("Aggregation already performed for this round")
+            return False
+            
+        logging.info(f"Starting decentralized model update for round {current_round}...")
+        self.current_round = current_round
         
         # Select aggregator
-        aggregator = self.select_aggregator(clients, validation_data)
+        aggregator = self.select_aggregator(clients, validation_data, current_round)
         if not aggregator:
             logging.warning("No suitable aggregator found")
             return False
         
         logging.info("Performing model aggregation...")
         # Perform aggregation
-        aggregated_state = aggregator.aggregate_models(clients, validation_data)
+        aggregated_state = aggregator.aggregate_models(clients, validation_data, current_round)
         if aggregated_state is None:
             logging.warning("Aggregation failed")
             return False
@@ -110,6 +119,12 @@ class GlobalAggregator(object):
         for client in clients:
             client.model.load_state_dict(aggregated_state)
             client.previous_global_model = copy.deepcopy(client.model)
+        
+        # Calculate validation loss for the updated global model
+        self.model.eval()
+        with torch.no_grad():
+            _, generated_data, _ = self.model(validation_data.to(self.device))
+            self.val_loss = torch.nn.MSELoss(reduction='mean')(validation_data.to(self.device), generated_data).item()
         
         logging.info("Model update completed successfully")
         return True

@@ -35,16 +35,16 @@ logging.basicConfig(level=logging.INFO,  # Set the logging level (DEBUG, INFO, W
 
 
 num_participants = 0.5
-epoch = 100 #5 #100
-num_rounds = 5 #5 #20
+epoch = 1 #5 #100
+num_rounds = 1 #5 #20
 lr_rate = 1e-3
-shrink_lambda = 10 #5 #10
+shrink_lambda = 1 #5 #10
 network_size = 10 #50
 data_seed = 1234
 no_Exp = f"nonIID_Exp1_Rerun_{epoch}epoch_10client_lr0001_lamda{shrink_lambda}_ratio{num_participants*100}"
 #no_Exp = f"IID-Update_Exp6_scale_{epoch}epoch_{network_size}client_{num_rounds}rounds_lr{lr_rate}_lamda{shrink_lambda}_ratio{num_participants*100}_dataseed{data_seed}"
 
-num_runs = 5 #5
+num_runs = 1 #5
 batch_size = 12
 
 new_device = True
@@ -219,13 +219,25 @@ if __name__ == "__main__":
             # Update global model using decentralized aggregation
             global_aggregator.update(clients=clients, validation_data=validation_data, current_round=round)
 
-            logging.info(f"Round {round+1}/{num_rounds} - Updated global model - \
-                Global loss: {global_aggregator.val_loss}")
+            logging.info(f"Round {round+1}/{num_rounds} - Updated global model - Global loss: {global_aggregator.val_loss}")
             
-            # Evaluate global model
-            evaluator = Evaluator(global_aggregator.model)
-            metrics = evaluator.evaluate(test_loader)
-            logging.info(f"Round {round + 1} metrics: {metrics}")
+            # Calculate AUC for each client model after aggregation
+            logging.info("Calculating AUC scores for all models...")
+            client_auc_scores = []
+            for i, client in enumerate(clients):
+                client_evaluator = Evaluator(client.model, model_type=model_type, metric="AUC")
+                client_auc = client_evaluator.evaluate(client_info[i]["test_loader"], client_info[i]["train_loader"])
+                if isinstance(client_auc, tuple):
+                    client_auc = client_auc[0]  # Extract just the AUC score if it's a tuple
+                client_auc_scores.append(client_auc)
+                logging.info(f"Client {i+1} AUC score: {client_auc}")
+            
+            # Calculate AUC for global model
+            global_evaluator = Evaluator(global_aggregator.model, model_type=model_type, metric="AUC")
+            global_auc = global_evaluator.evaluate(test_loader, train_loader)
+            if isinstance(global_auc, tuple):
+                global_auc = global_auc[0]  # Extract just the AUC score if it's a tuple
+            logging.info(f"Global model AUC score: {global_auc}")
             
             # Save results
             directory = f'Checkpoint/Results/Update/{network_size}/{no_Exp}/Run_{run}/{metric}'
@@ -236,7 +248,8 @@ if __name__ == "__main__":
             with open(filename, 'a') as f:
                 json.dump({
                     'round': round + 1,
-                    'metrics': metrics
+                    'client_auc_scores': [float(score) for score in client_auc_scores],
+                    'global_auc_score': float(global_auc)
                 }, f)
                 f.write('\n')
         

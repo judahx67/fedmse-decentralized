@@ -7,4 +7,4 @@ This is Trainer endpoint.
 """
 
 from .client_trainer import ClientTrainer
-from .global_aggregator import GlobalAggregator
+# from .deleted_global_aggregator import GlobalAggregator

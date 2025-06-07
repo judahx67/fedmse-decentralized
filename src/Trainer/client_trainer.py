@@ -61,13 +61,74 @@ class ClientTrainer(object):
         self.update_type = update_type
         self.fedprox_mu = fedprox_mu
         
-        # New attributes for aggregation
-        self.aggregation_count = 0  # Track how many times this client has been selected as aggregator
-        self.max_aggregation_threshold = 3  # Maximum times a client can be selected as aggregator
-        self.mse_score = float('inf')  # MSE score for voting
-        self.votes_received = 0  # Number of votes received from other clients
-        self.current_round = -1  # Track current round
-        self.has_aggregated_this_round = False  # Flag to track if aggregation has been performed in current round
+        # New attributes for peer-to-peer communication
+        self.peers = []  # List of peer clients
+        self.aggregation_count = 0
+        self.max_aggregation_threshold = 3
+        self.mse_score = float('inf')
+        self.votes_received = 0
+        self.current_round = -1
+        self.has_aggregated_this_round = False
+        self.received_models = {}  # Store received model updates from peers
+        self.validation_data = None  # Store validation data for aggregation
+
+    def connect_to_peers(self, peers):
+        """Connect to peer clients for P2P communication"""
+        self.peers = peers
+        logging.info(f"Connected to {len(peers)} peers")
+
+    def broadcast_model(self):
+        """Broadcast current model to all peers"""
+        model_state = self.model.state_dict()
+        for peer in self.peers:
+            peer.receive_model(self, model_state)
+        logging.info("Model broadcasted to all peers")
+
+    def receive_model(self, sender, model_state):
+        """Receive model update from a peer"""
+        self.received_models[sender] = model_state
+        logging.info(f"Received model from peer {sender}")
+
+    def request_aggregation(self):
+        """Request aggregation from peers"""
+        if self.aggregation_count >= self.max_aggregation_threshold:
+            return None
+        
+        # Calculate MSE scores for all received models
+        weights = []
+        total_weight = 0
+        
+        for sender, model_state in self.received_models.items():
+            mse_score = self.calculate_mse_score(self.validation_data)
+            weight = 1.0 / (mse_score + 1e-10)
+            weights.append((model_state, weight))
+            total_weight += weight
+        
+        # Normalize weights
+        weights = [(state_dict, weight/total_weight) for state_dict, weight in weights]
+        
+        # Aggregate models
+        aggregated_state = {}
+        for key in weights[0][0].keys():
+            aggregated_state[key] = sum(state_dict[key] * weight for state_dict, weight in weights)
+        
+        self.aggregation_count += 1
+        self.has_aggregated_this_round = True
+        return aggregated_state
+
+    def update_from_peers(self):
+        """Update model based on received peer updates"""
+        if not self.received_models:
+            return
+        
+        aggregated_state = self.request_aggregation()
+        if aggregated_state:
+            self.model.load_state_dict(aggregated_state)
+            self.previous_global_model = copy.deepcopy(self.model)
+            logging.info("Model updated from peer aggregation")
+        
+        # Clear received models after update
+        self.received_models.clear()
 
     def calculate_mse_score(self, validation_data):
         """

@@ -23,7 +23,7 @@ from DataLoader import load_data
 from DataLoader import IoTDataset
 from DataLoader import IoTDataProccessor
 from Trainer import ClientTrainer
-from Trainer import GlobalAggregator
+# from Trainer import GlobalAggregator
 from Evaluator import Evaluator
 
 import logging
@@ -185,59 +185,45 @@ if __name__ == "__main__":
                 "save_dir": os.path.join(f"Checkpoint/{network_size}/{no_Exp}/{run}/ClientModel", 
                                     scen_name, model_type, update_type, device_name)
             })
-        # Initialize global aggregator
-        if model_type == "hybrid":
-            global_model = Shrink_Autoencoder(input_dim=dim_features,
-                                            output_dim=dim_features,
-                                            shrink_lambda=shrink_lambda)
-        else:
-            global_model = Autoencoder(input_dim=dim_features,
-                                     output_dim=dim_features)
-        
-        global_aggregator = GlobalAggregator(model=global_model, update_type=update_type)
-        
+
+        # Connect clients in a peer-to-peer network
+        for i, client in enumerate(clients):
+            # Connect to all other clients except self
+            peers = [c for j, c in enumerate(clients) if j != i]
+            client.connect_to_peers(peers)
+            client.validation_data = torch.Tensor(processed_valid_data)
+
         # Training loop
         for round in range(num_rounds):
             logging.info(f"Starting round {round + 1}/{num_rounds}")
             
-            # Train clients
-            client_weights = []
-            total_training_samples = sum(len(client_info[i]["train_loader"].dataset) for i in range(len(clients)))
+            # Train clients locally
             for i, client in enumerate(clients):
-                logging.info("Training local model...")
-                device_trainer = ClientTrainer(model=global_aggregator.model, \
-                    save_dir=client_info[i]['save_dir'], epoch=epoch, update_type=update_type, lr_rate=lr_rate)
-                device_trainer.run(client_info[i]["train_loader"], client_info[i]["valid_loader"])
-                client_weights.append((copy.deepcopy(device_trainer.model.state_dict()), total_training_samples, len(client_info[i]["train_loader"].dataset)))
-                logging.info(f"Client {i} training done!")
-                
-            logging.info(f"Round {round+1}/{num_rounds} - Updating global model")
+                logging.info(f"Training client {i+1}...")
+                client.run(client_info[i]["train_loader"], client_info[i]["valid_loader"])
+                logging.info(f"Client {i+1} training done!")
             
-            # Get validation data for aggregation
-            validation_data = torch.Tensor(processed_valid_data)
+            # Peer-to-peer model updates
+            logging.info("Starting peer-to-peer model updates...")
             
-            # Update global model using decentralized aggregation
-            global_aggregator.update(clients=clients, validation_data=validation_data, current_round=round)
-
-            logging.info(f"Round {round+1}/{num_rounds} - Updated global model - Global loss: {global_aggregator.val_loss}")
+            # Each client broadcasts its model to peers
+            for client in clients:
+                client.broadcast_model()
             
-            # Calculate AUC for each client model after aggregation
+            # Each client updates its model based on received peer updates
+            for client in clients:
+                client.update_from_peers()
+            
+            # Calculate AUC for each client model
             logging.info("Calculating AUC scores for all models...")
             client_auc_scores = []
             for i, client in enumerate(clients):
                 client_evaluator = Evaluator(client.model, model_type=model_type, metric="AUC")
                 client_auc = client_evaluator.evaluate(client_info[i]["test_loader"], client_info[i]["train_loader"])
                 if isinstance(client_auc, tuple):
-                    client_auc = client_auc[0]  # Extract just the AUC score if it's a tuple
+                    client_auc = client_auc[0]
                 client_auc_scores.append(client_auc)
                 logging.info(f"Client {i+1} AUC score: {client_auc}")
-            
-            # Calculate AUC for global model
-            global_evaluator = Evaluator(global_aggregator.model, model_type=model_type, metric="AUC")
-            global_auc = global_evaluator.evaluate(test_loader, train_loader)
-            if isinstance(global_auc, tuple):
-                global_auc = global_auc[0]  # Extract just the AUC score if it's a tuple
-            logging.info(f"Global model AUC score: {global_auc}")
             
             # Save results
             directory = f'Checkpoint/Results/Update/{network_size}/{no_Exp}/Run_{run}/{metric}'
@@ -248,8 +234,7 @@ if __name__ == "__main__":
             with open(filename, 'a') as f:
                 json.dump({
                     'round': round + 1,
-                    'client_auc_scores': [float(score) for score in client_auc_scores],
-                    'global_auc_score': float(global_auc)
+                    'client_auc_scores': [float(score) for score in client_auc_scores]
                 }, f)
                 f.write('\n')
         

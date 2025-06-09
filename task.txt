@@ -15,6 +15,7 @@ Implementation Plan for Decentralized Federated Learning System
      * Weights are assigned based on MSE performance
      * Clients vote for aggregator selection
    - Ensure weight calculation is transparent and fair
+DONE 
 
 3. Security and Anti-Manipulation Measures
    - Implement rotation system for aggregator selection

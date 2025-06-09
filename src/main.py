@@ -34,7 +34,7 @@ logging.basicConfig(level=logging.INFO,  # Set the logging level (DEBUG, INFO, W
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-num_participants = 0.5
+num_participants = 1 # 0.5
 epoch = 1 #5 #100
 num_rounds = 1 #5 #20
 lr_rate = 1e-3
@@ -60,6 +60,7 @@ scen_name = 'FL-IoT'
 
 #config_file = f"Configuration/scen2-nba-iot-50clients.json"
 config_file = "Configuration/scen2-nba-iot-10clients_noniid.json"
+#config_file = "Configuration/kitsune-iot-10clients.json"
 # config_file = "Configuration/cic-config.json"
 
 def set_seeds(seed):
@@ -70,6 +71,15 @@ def set_seeds(seed):
         torch.cuda.manual_seed_all(seed)
 
 if __name__ == "__main__":
+    # Calculate total combinations for progress tracking
+    update_types = ["avg", "fedprox", "mse_avg"]
+    model_types = ["hybrid", "autoencoder"]
+    total_combinations = len(update_types) * len(model_types) * num_runs
+    current_combination = 0
+    
+    # Dictionary to store best metrics for summary
+    best_metrics = {mt: {ut: float('-inf') for ut in update_types} for mt in model_types}
+    
     for run in range(num_runs):
         set_seeds(run * 10000)  # Set different seed for each run
         random.seed(data_seed)
@@ -152,29 +162,6 @@ if __name__ == "__main__":
                 pin_memory=True
             )
             
-            # Create client trainer
-            if model_type == "hybrid":
-                model = Shrink_Autoencoder(input_dim=dim_features,
-                                         output_dim=dim_features,
-                                         shrink_lambda=shrink_lambda)
-            else:
-                model = Autoencoder(input_dim=dim_features,
-                                  output_dim=dim_features)
-            
-            client = ClientTrainer(
-                model=model,
-                loss_function=nn.MSELoss,
-                optimizer=torch.optim.Adam,
-                epoch=epoch,
-                batch_size=batch_size,
-                lr_rate=lr_rate,
-                update_type=update_type,
-                patience=global_patience,
-                save_dir=os.path.join(f"Checkpoint/{network_size}/{no_Exp}/{run}/ClientModel", 
-                                    scen_name, model_type, update_type, device_name)
-            )
-            clients.append(client)
-            
             client_info.append({
                 "device": device_name,
                 "train_loader": train_loader,
@@ -186,10 +173,56 @@ if __name__ == "__main__":
                                     scen_name, model_type, update_type, device_name)
             })
 
+        # Initialize clients with P2P
+        trainers = []
+        client_ids = list(range(len(client_info)))
+        
+        # Create development dataset from all clients' dev data
+        min_len = min([len(client['dev_normal_dataset']) for client in client_info])
+        dev_dataset = []
+        for client in client_info:
+            sample_data = client['dev_normal_dataset'].sample(n=min_len)
+            dev_dataset.append(sample_data)
+        dev_dataset = pd.concat(dev_dataset, axis=0)
+        
+        # Process development dataset
+        data_processor = IoTDataProccessor(scaler="standard")
+        processed_dev_data, _ = data_processor.fit_transform(dev_dataset)
+        
+        for i, client in enumerate(client_info):
+            client['save_dir'] = os.path.join(f"Checkpoint/{network_size}/{no_Exp}/{run}/ClientModel", 
+                                    scen_name, model_type, update_type, client['device'])
+            
+            # Create client trainer
+            if model_type == "hybrid":
+                model = Shrink_Autoencoder(input_dim=dim_features,
+                                         output_dim=dim_features,
+                                         shrink_lambda=shrink_lambda)
+            else:
+                model = Autoencoder(input_dim=dim_features,
+                                  output_dim=dim_features)
+            
+            trainer = ClientTrainer(
+                model=model,
+                loss_function=nn.MSELoss,
+                optimizer=torch.optim.Adam,
+                epoch=epoch,
+                batch_size=batch_size,
+                lr_rate=lr_rate,
+                update_type=update_type,
+                patience=global_patience,
+                save_dir=client['save_dir'],
+                client_id=i
+            )
+            
+            # Initialize development dataset for aggregation
+            trainer.create_dev_dataset({"dataset": processed_dev_data})
+            trainers.append(trainer)
+
         # Connect clients in a peer-to-peer network
-        for i, client in enumerate(clients):
+        for i, client in enumerate(trainers):
             # Connect to all other clients except self
-            peers = [c for j, c in enumerate(clients) if j != i]
+            peers = [c for j, c in enumerate(trainers) if j != i]
             client.connect_to_peers(peers)
             client.validation_data = torch.Tensor(processed_valid_data)
 
@@ -198,7 +231,7 @@ if __name__ == "__main__":
             logging.info(f"Starting round {round + 1}/{num_rounds}")
             
             # Train clients locally
-            for i, client in enumerate(clients):
+            for i, client in enumerate(trainers):
                 logging.info(f"Training client {i+1}...")
                 client.run(client_info[i]["train_loader"], client_info[i]["valid_loader"])
                 logging.info(f"Client {i+1} training done!")
@@ -207,23 +240,23 @@ if __name__ == "__main__":
             logging.info("Starting peer-to-peer model updates...")
             
             # Each client broadcasts its model to peers
-            for client in clients:
+            for client in trainers:
                 client.broadcast_model()
             
             # Each client updates its model based on received peer updates
-            for client in clients:
+            for client in trainers:
                 client.update_from_peers()
             
-            # Calculate AUC for each client model
-            logging.info("Calculating AUC scores for all models...")
-            client_auc_scores = []
-            for i, client in enumerate(clients):
-                client_evaluator = Evaluator(client.model, model_type=model_type, metric="AUC")
-                client_auc = client_evaluator.evaluate(client_info[i]["test_loader"], client_info[i]["train_loader"])
-                if isinstance(client_auc, tuple):
-                    client_auc = client_auc[0]
-                client_auc_scores.append(client_auc)
-                logging.info(f"Client {i+1} AUC score: {client_auc}")
+            # Calculate metrics for each client model
+            logging.info("Calculating metrics for all models...")
+            client_metrics = []
+            for i, client in enumerate(trainers):
+                client_evaluator = Evaluator(client.model, model_type=model_type, metric=metric)
+                client_metric = client_evaluator.evaluate(client_info[i]["test_loader"], client_info[i]["train_loader"])
+                if isinstance(client_metric, tuple):
+                    client_metric = client_metric[0]
+                client_metrics.append(client_metric)
+                logging.info(f"Client {i+1} {metric} score: {client_metric}")
             
             # Save results
             directory = f'Checkpoint/Results/Update/{network_size}/{no_Exp}/Run_{run}/{metric}'
@@ -234,7 +267,55 @@ if __name__ == "__main__":
             with open(filename, 'a') as f:
                 json.dump({
                     'round': round + 1,
-                    'client_auc_scores': [float(score) for score in client_auc_scores]
+                    'client_metrics': [float(score) for score in client_metrics],
+                    'update_type': update_type,
+                    'model_type': model_type,
+                    'global_loss': min(client_metrics) if client_metrics else float('inf')
                 }, f)
                 f.write('\n')
+            
+            # Check early stopping
+            if min(client_metrics) < min_val_loss:
+                min_val_loss = min(client_metrics)
+                global_worse = 0
+            else:
+                global_worse += 1
+                if global_worse > global_patience:
+                    logging.info("Early stopping in global round!")
+                    break
+        
+        # After training loop, update best metrics
+        for i, trainer in enumerate(trainers):
+            client_evaluator = Evaluator(trainer.model, model_type=model_type, metric=metric)
+            client_metric = client_evaluator.evaluate(client_info[i]["test_loader"], 
+                                                    client_info[i]["train_loader"])
+            if isinstance(client_metric, tuple):
+                client_metric = client_metric[0]
+            best_metrics[model_type][update_type] = max(best_metrics[model_type][update_type], client_metric)
+
+        # Clean up GPU memory after each combination
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logging.info("Cleaned up GPU memory")
+
+    # Print training summary
+    logging.info("\nTraining Summary:")
+    logging.info("="*50)
+    for model_type in model_types:
+        for update_type in update_types:
+            logging.info(f"{model_type} + {update_type}: Best {metric} = {best_metrics[model_type][update_type]:.4f}")
+    logging.info("="*50)
+
+    # Save summary to file
+    summary_file = f'Checkpoint/Results/Update/{network_size}/{no_Exp}/training_summary.json'
+    os.makedirs(os.path.dirname(summary_file), exist_ok=True)
+    with open(summary_file, 'w') as f:
+        json.dump({
+            'best_metrics': best_metrics,
+            'metric_type': metric,
+            'num_runs': num_runs,
+            'network_size': network_size,
+            'experiment_name': no_Exp
+        }, f, indent=4)
+    logging.info(f"Saved training summary to {summary_file}")
         

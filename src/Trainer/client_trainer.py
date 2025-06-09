@@ -38,7 +38,7 @@ class ClientTrainer(object):
 
     def __init__(self, model=None, loss_function=nn.MSELoss, optimizer=torch.optim.Adam,
                     epoch=10, batch_size=100, lr_rate=1e-3, update_type="avg",
-                    patience=3, save_dir="Checkpoint/ClientModel/", fedprox_mu=0.001) -> None:
+                    patience=3, save_dir="Checkpoint/ClientModel/", fedprox_mu=0.001, client_id=None) -> None:
         
         if model is None:
             logging.info("Have to indicate the model to train.")
@@ -60,6 +60,7 @@ class ClientTrainer(object):
         self.save_dir = save_dir
         self.update_type = update_type
         self.fedprox_mu = fedprox_mu
+        self.client_id = client_id
         
         # New attributes for peer-to-peer communication
         self.peers = []  # List of peer clients
@@ -71,6 +72,41 @@ class ClientTrainer(object):
         self.has_aggregated_this_round = False
         self.received_models = {}  # Store received model updates from peers
         self.validation_data = None  # Store validation data for aggregation
+        self.dev_dataset = None  # Store development dataset for aggregation
+
+    def create_dev_dataset(self, dataset):
+        """Create development dataset for aggregation"""
+        self.dev_dataset = dataset["dataset"]
+        logging.info("Created development dataset for aggregation")
+
+    def fed_avg(self, local_models):
+        """Perform federated averaging"""
+        total_samples = sum(num_samples for _, num_samples in local_models)
+        avg_weights = {}
+        for key in local_models[0][0].keys():
+            avg_weights[key] = sum(model[0][key] * (model[1] / total_samples) for model in local_models)
+        return avg_weights
+
+    def fed_mse_avg(self, local_models):
+        """Perform MSE-based weighted averaging"""
+        update_weights = []
+        for model_state, num_samples in local_models:
+            self.model.load_state_dict(model_state)
+            self.model.eval()
+            with torch.no_grad():
+                _, generated_data, _ = self.model(torch.Tensor(self.dev_dataset).to(self.device))
+                mse_score = torch.nn.MSELoss(reduction='mean')(torch.Tensor(self.dev_dataset).to(self.device), generated_data)
+                update_weights.append((model_state, 1/mse_score))
+        
+        avg_weights = {}
+        total_weight = sum(weight for _, weight in update_weights)
+        for key in update_weights[0][0].keys():
+            avg_weights[key] = sum(w[key] * (weight/total_weight) for w, weight in update_weights)
+        return avg_weights
+
+    def fedprox(self, local_models):
+        """Perform FedProx aggregation"""
+        return self.fed_avg(local_models)  # FedProx uses same averaging but adds proximal term in training
 
     def connect_to_peers(self, peers):
         """Connect to peer clients for P2P communication"""
@@ -91,26 +127,20 @@ class ClientTrainer(object):
 
     def request_aggregation(self):
         """Request aggregation from peers"""
-        if self.aggregation_count >= self.max_aggregation_threshold:
+        if self.aggregation_count >= self.max_aggregation_threshold or not self.received_models:
             return None
         
-        # Calculate MSE scores for all received models
-        weights = []
-        total_weight = 0
+        local_models = [(model_state, 1) for model_state in self.received_models.values()]
         
-        for sender, model_state in self.received_models.items():
-            mse_score = self.calculate_mse_score(self.validation_data)
-            weight = 1.0 / (mse_score + 1e-10)
-            weights.append((model_state, weight))
-            total_weight += weight
-        
-        # Normalize weights
-        weights = [(state_dict, weight/total_weight) for state_dict, weight in weights]
-        
-        # Aggregate models
-        aggregated_state = {}
-        for key in weights[0][0].keys():
-            aggregated_state[key] = sum(state_dict[key] * weight for state_dict, weight in weights)
+        if self.update_type == "avg":
+            aggregated_state = self.fed_avg(local_models)
+        elif self.update_type == "mse_avg":
+            aggregated_state = self.fed_mse_avg(local_models)
+        elif self.update_type == "fedprox":
+            aggregated_state = self.fedprox(local_models)
+        else:
+            logging.error(f"Unknown update type: {self.update_type}")
+            return None
         
         self.aggregation_count += 1
         self.has_aggregated_this_round = True
@@ -276,108 +306,61 @@ class ClientTrainer(object):
         pass
     
     def run(self, train_loader, valid_loader=None):
-        """
-        Run the training process.
-
-        Args:
-            train_loader (torch.utils.data.DataLoader): The data loader for training data.
-            valid_loader (torch.utils.data.DataLoader, optional): The data loader for validation data. Defaults to None.
-        """
+        """Run the training process"""
+        min_valid_loss = float("inf")
+        worse_count = 0
+        training_tracking = []
         
-        # if self.update_type == "fedprox" or self.update_type == "mse_avg":
-        if self.update_type == "fedprox":
-            print("Using FedProx or MSE-AVG")
-            min_valid_loss = float("inf")
-            worse_count = 0
-            training_tracking = []
-            for epoch in range(self.epoch):
-                self.model.train()
-                epoch_loss = 0
-                for i, batch_input in zip(tqdm(range(len(train_loader)), desc='Training batch: ...'), train_loader):
-                    _, _, loss = self.model(batch_input[0].to(self.device))
-                    
-                    # Add the proximal term to the loss
+        for epoch in range(self.epoch):
+            self.model.train()
+            epoch_loss = 0
+            for i, batch_input in zip(tqdm(range(len(train_loader)), desc='Training batch: ...'), train_loader):
+                _, _, loss = self.model(batch_input[0].to(self.device))
+                
+                # Add proximal term for FedProx
+                if self.update_type == "fedprox":
                     prox_term = 0.0
                     for param, global_param in zip(self.model.parameters(), self.previous_global_model.parameters()):
                         prox_term += torch.sum(torch.square(param - global_param.to(self.device)))
                     loss += self.fedprox_mu * prox_term
-                    
-                    loss.backward()
-                    self.optimizer.step()
-                    self.optimizer.zero_grad()
-                    epoch_loss += loss.item()
-                    
-                epoch_loss = epoch_loss / len(train_loader)
-                # self.lr_scheduler.step()
-                if valid_loader is not None:
-                    valid_loss = 0
-                    self.model.eval()
-                    with torch.no_grad():
-                        for i, batch_input in zip(tqdm(range(len(valid_loader)), desc='Validating batch: ...'), valid_loader):
-                            _, _, loss = self.model(batch_input[0].to(self.device))
-                            
+                
+                loss.backward()
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+                epoch_loss += loss.item()
+            
+            epoch_loss = epoch_loss / len(train_loader)
+            
+            if valid_loader is not None:
+                valid_loss = 0
+                self.model.eval()
+                with torch.no_grad():
+                    for i, batch_input in zip(tqdm(range(len(valid_loader)), desc='Validating batch: ...'), valid_loader):
+                        _, _, loss = self.model(batch_input[0].to(self.device))
                         
-                            # Add the proximal term to the loss
+                        # Add proximal term for FedProx validation
+                        if self.update_type == "fedprox":
                             prox_term = 0.0
                             for param, global_param in zip(self.model.parameters(), self.previous_global_model.parameters()):
                                 prox_term += torch.sum(torch.square(param - global_param.to(self.device)))
                             loss += self.fedprox_mu * prox_term
-
-                            valid_loss += loss.item()
-                            
-                        valid_loss = valid_loss / len(valid_loader)
-                        training_tracking.append((epoch_loss, valid_loss))
-                        logging.info(f"Epoch {epoch+1} - Training loss: {epoch_loss} - Validating loss: {valid_loss}")
-
-                    if valid_loss < min_valid_loss:
-                        min_valid_loss = valid_loss
-                        self.save_model()
-                        worse_count = 0
-                    else:
-                        worse_count += 1
-                        if worse_count >= self.patience:
-                            logging.info(f"Early stopping in epoch {epoch+1}.")
-                            pickle.dump(training_tracking, open(os.path.join(self.save_dir, "training_tracking.pkl"), "wb"))
-                            break
-                
-                pickle.dump(training_tracking, open(os.path.join(self.save_dir, "training_tracking.pkl"), "wb"))
-        else:
-            min_valid_loss = float("inf")
-            worse_count = 0
-            training_tracking = []
-            for epoch in range(self.epoch):
-                self.model.train()
-                epoch_loss = 0
-                for i, batch_input in zip(tqdm(range(len(train_loader)), desc='Training batch: ...'), train_loader):
-                    _, _, loss = self.model(batch_input[0].to(self.device))
-                    loss.backward()
-                    self.optimizer.step()
-                    self.optimizer.zero_grad()
-                    epoch_loss += loss.item()
-                epoch_loss = epoch_loss / len(train_loader)
-                # self.lr_scheduler.step()
-                if valid_loader is not None:
-                    valid_loss = 0
-                    self.model.eval()
-                    with torch.no_grad():
-                        for i, batch_input in zip(tqdm(range(len(valid_loader)), desc='Validating batch: ...'), valid_loader):
-                            _, _, loss = self.model(batch_input[0].to(self.device))
-                            valid_loss += loss.item()
                         
-                        valid_loss = valid_loss / len(valid_loader)
-                        training_tracking.append((epoch_loss, valid_loss))
-                        logging.info(f"Epoch {epoch+1} - Training loss: {epoch_loss} - Validating loss: {valid_loss}")
+                        valid_loss += loss.item()
+                    
+                    valid_loss = valid_loss / len(valid_loader)
+                    training_tracking.append((epoch_loss, valid_loss))
+                    logging.info(f"Epoch {epoch+1} - Training loss: {epoch_loss} - Validating loss: {valid_loss}")
 
-                    if valid_loss < min_valid_loss:
-                        min_valid_loss = valid_loss
-                        self.save_model()
-                        worse_count = 0
-                    else:
-                        worse_count += 1
-                        if worse_count >= self.patience:
-                            logging.info(f"Early stopping in epoch {epoch+1}.")
-                            pickle.dump(training_tracking, open(os.path.join(self.save_dir, "training_tracking.pkl"), "wb"))
-                            break
-                
-                pickle.dump(training_tracking, open(os.path.join(self.save_dir, "training_tracking.pkl"), "wb"))
+                if valid_loss < min_valid_loss:
+                    min_valid_loss = valid_loss
+                    self.save_model()
+                    worse_count = 0
+                else:
+                    worse_count += 1
+                    if worse_count >= self.patience:
+                        logging.info(f"Early stopping in epoch {epoch+1}.")
+                        pickle.dump(training_tracking, open(os.path.join(self.save_dir, "training_tracking.pkl"), "wb"))
+                        break
+            
+            pickle.dump(training_tracking, open(os.path.join(self.save_dir, "training_tracking.pkl"), "wb"))
             

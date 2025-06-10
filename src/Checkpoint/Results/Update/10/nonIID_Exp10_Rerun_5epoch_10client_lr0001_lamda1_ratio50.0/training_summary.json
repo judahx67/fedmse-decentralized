@@ -1,0 +1,18 @@
+{
+    "best_metrics": {
+        "hybrid": {
+            "avg": 0.9990073094873361,
+            "fedprox": 0.999620800944581,
+            "mse_avg": 0.999277799797891
+        },
+        "autoencoder": {
+            "avg": 0.9997964627366122,
+            "fedprox": 0.9997964627366122,
+            "mse_avg": 0.9997964627366122
+        }
+    },
+    "metric_type": "AUC",
+    "num_runs": 2,
+    "network_size": 10,
+    "experiment_name": "nonIID_Exp10_Rerun_5epoch_10client_lr0001_lamda1_ratio50.0"
+}

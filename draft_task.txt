@@ -1,0 +1,9 @@
+1) chuyển và chỉnh code tổng hợp model của global qua client (có class của client), nhớ chỉnh lại code trong hàm main là gọi hàm tổng hợp của client[đúng đối tượng] (đúng thằng được tạo ra từ class đó)
+2) tui chưa biết là nó tính trọng số trong main.py hay client, nếu không phải ở trong client thì có thể chuyển nó vào class của client được không, mình sử dụng hàm main.py để coi thằng nào có trọng số đẹp nhất rồi gọi hàm tổng hợp của thằng đó ra tổng hợp.
+3) nhớ để ý cơ chế voting bảo mật xíu (tham khảo thêm), kiểu để không gọi 1 thằng nào đó quá nhiều lần tránh bị thao túng @@
+
+
+
+1/ move aggregation code from global to clientrainer (as in changing to decentralized), remember to change main.py to call aggregator on client 
+2/ Use MSE score to calculate weight and clients start voting from there 
+3/ Avoiding calling 1 client as aggregators too many times 

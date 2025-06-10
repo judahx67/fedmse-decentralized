@@ -34,17 +34,17 @@ logging.basicConfig(level=logging.INFO,  # Set the logging level (DEBUG, INFO, W
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-num_participants = 1 # 0.5
-epoch = 1 #5 #100
-num_rounds = 1 #5 #20
+num_participants = 0.5 # 0.5
+epoch = 5 #5 #100
+num_rounds = 5 #5 #20
 lr_rate = 1e-3
 shrink_lambda = 1 #5 #10
 network_size = 10 #50
 data_seed = 1234
-no_Exp = f"nonIID_Exp1_Rerun_{epoch}epoch_10client_lr0001_lamda{shrink_lambda}_ratio{num_participants*100}"
+no_Exp = f"nonIID_Exp10_Rerun_{epoch}epoch_10client_lr0001_lamda{shrink_lambda}_ratio{num_participants*100}"
 #no_Exp = f"IID-Update_Exp6_scale_{epoch}epoch_{network_size}client_{num_rounds}rounds_lr{lr_rate}_lamda{shrink_lambda}_ratio{num_participants*100}_dataseed{data_seed}"
 
-num_runs = 1 #5
+num_runs = 2 #5
 batch_size = 12
 
 new_device = True
@@ -52,8 +52,9 @@ min_val_loss = float("inf")
 global_patience = 1
 global_worse = 0
 metric = "AUC" #AUC or classification
-model_type = "hybrid"   #autoencoder; hybrid;
-update_type = "mse_avg"  #avg; fusion_avg; mse_avg
+# Define all combinations to try
+model_types = ["hybrid", "autoencoder"]
+update_types = ["avg", "fedprox", "mse_avg"]
 dim_features = 115   #nba-iot: 115; cic-2023: 46
 
 scen_name = 'FL-IoT' 
@@ -72,231 +73,255 @@ def set_seeds(seed):
 
 if __name__ == "__main__":
     # Calculate total combinations for progress tracking
-    update_types = ["avg", "fedprox", "mse_avg"]
-    model_types = ["hybrid", "autoencoder"]
     total_combinations = len(update_types) * len(model_types) * num_runs
     current_combination = 0
     
     # Dictionary to store best metrics for summary
     best_metrics = {mt: {ut: float('-inf') for ut in update_types} for mt in model_types}
     
-    for run in range(num_runs):
-        set_seeds(run * 10000)  # Set different seed for each run
-        random.seed(data_seed)
-        np.random.seed(data_seed)
-        
-        try:
-            logging.info("Loading configuration...")
-            with open(config_file, "r") as config_file:
-                config = json.load(config_file)
-        except Exception as e:
-            logging.info("Failed to load configuration.")
-        
-        devices_list = random.sample(config['devices_list'], network_size)
-        client_info = []
-        
-        # Initialize clients
-        clients = []
-        for device in devices_list:
-            logging.info("Creating metadata for client...")
-            normal_data_path = os.path.join(config['data_path'], device["normal_data_path"])
-            abnormal_data_path = os.path.join(config['data_path'], device["abnormal_data_path"])
-            test_new_normal_data_path = os.path.join(config['data_path'], device["test_normal_data_path"])
-            
-            logging.info("Loading data from {}...".format(device['name']))
-            
-            normal_data = load_data(normal_data_path)
-            normal_data = normal_data.sample(frac=1).reset_index(drop=True)
-            abnormal_data = load_data(abnormal_data_path)
-            abnormal_data = abnormal_data.sample(frac=1).reset_index(drop=True)
-            
-            if new_device:
-                new_normal_data = load_data(test_new_normal_data_path)
-            
-            device_name = device['name']
-            print(f"{device_name} has {len(normal_data)} normal data and {len(abnormal_data)} abnormal data")
-            
-            # Split data
-            train_normal_size = int(0.4 * len(normal_data))
-            valid_normal_size = int(0.1 * len(normal_data))
-            dev_normal_size = int(0.4 * len(normal_data))
-            test_normal_size = len(normal_data) - train_normal_size - valid_normal_size - dev_normal_size
-            
-            train_normal_data = normal_data[:train_normal_size]
-            valid_normal_data = normal_data[train_normal_size:train_normal_size+valid_normal_size]
-            dev_normal_data = normal_data[train_normal_size+valid_normal_size:train_normal_size+valid_normal_size+dev_normal_size]
-            test_normal_data = normal_data[train_normal_size+valid_normal_size+dev_normal_size:]
+    # Print initial parameters
+    logging.info("\n" + "="*50)
+    logging.info("Training Parameters:")
+    logging.info("="*50)
+    logging.info(f"Number of runs: {num_runs}")
+    logging.info(f"Number of rounds per run: {num_rounds}")
+    logging.info(f"Epochs per round: {epoch}")
+    logging.info(f"Learning rate: {lr_rate}")
+    logging.info(f"Shrink lambda: {shrink_lambda}")
+    logging.info(f"Network size: {network_size}")
+    logging.info(f"Number of participants ratio: {num_participants}")
+    logging.info(f"Batch size: {batch_size}")
+    logging.info(f"Data seed: {data_seed}")
+    logging.info(f"Experiment name: {no_Exp}")
+    logging.info(f"Model types: {model_types}")
+    logging.info(f"Update types: {update_types}")
+    logging.info(f"Total combinations to run: {total_combinations}")
+    logging.info("="*50 + "\n")
 
-            data_processor = IoTDataProccessor(scaler="standard")
-            processed_train_data, train_label = data_processor.fit_transform(train_normal_data)
-            processed_valid_data, valid_label = data_processor.transform(valid_normal_data)
-            processed_test_data, test_label = data_processor.transform(test_normal_data)
-            processed_abnormal_data, abnormal_label = data_processor.transform(abnormal_data, type="abnormal")
-            
-            if new_device:
-                processed_new_normal_data, new_normal_label = data_processor.transform(new_normal_data)
-                processed_test_data = np.concatenate([processed_test_data, processed_new_normal_data], axis=0)
-                processed_test_label = np.concatenate([test_label, new_normal_label], axis=0)
-                test_dataset = IoTDataset(processed_test_data, processed_test_label)
-            else:
-                test_dataset = IoTDataset(processed_test_data, test_label)
-            
-            train_dataset = IoTDataset(processed_train_data, train_label)
-            valid_dataset = IoTDataset(processed_valid_data, valid_label)
-            abnormal_dataset = IoTDataset(processed_abnormal_data, abnormal_label)
-            test_dataset = ConcatDataset([test_dataset, abnormal_dataset])
+    # Loop over all combinations
+    for model_type in model_types:
+        for update_type in update_types:
+            for run in range(num_runs):
+                current_combination += 1
+                logging.info(f"\nStarting combination {current_combination}/{total_combinations}")
+                logging.info(f"Model type: {model_type}, Update type: {update_type}, Run: {run + 1}/{num_runs}")
+                
+                set_seeds(run * 10000)  # Set different seed for each run
+                random.seed(data_seed)
+                np.random.seed(data_seed)
+                
+                try:
+                    logging.info("Loading configuration...")
+                    with open(config_file, "r") as config_file:
+                        config = json.load(config_file)
+                except Exception as e:
+                    logging.info("Failed to load configuration.")
+                
+                devices_list = random.sample(config['devices_list'], network_size)
+                client_info = []
+                
+                # Initialize clients
+                clients = []
+                for device in devices_list:
+                    logging.info("Creating metadata for client...")
+                    normal_data_path = os.path.join(config['data_path'], device["normal_data_path"])
+                    abnormal_data_path = os.path.join(config['data_path'], device["abnormal_data_path"])
+                    test_new_normal_data_path = os.path.join(config['data_path'], device["test_normal_data_path"])
+                    
+                    logging.info("Loading data from {}...".format(device['name']))
+                    
+                    normal_data = load_data(normal_data_path)
+                    normal_data = normal_data.sample(frac=1).reset_index(drop=True)
+                    abnormal_data = load_data(abnormal_data_path)
+                    abnormal_data = abnormal_data.sample(frac=1).reset_index(drop=True)
+                    
+                    if new_device:
+                        new_normal_data = load_data(test_new_normal_data_path)
+                    
+                    device_name = device['name']
+                    print(f"{device_name} has {len(normal_data)} normal data and {len(abnormal_data)} abnormal data")
+                    
+                    # Split data
+                    train_normal_size = int(0.4 * len(normal_data))
+                    valid_normal_size = int(0.1 * len(normal_data))
+                    dev_normal_size = int(0.4 * len(normal_data))
+                    test_normal_size = len(normal_data) - train_normal_size - valid_normal_size - dev_normal_size
+                    
+                    train_normal_data = normal_data[:train_normal_size]
+                    valid_normal_data = normal_data[train_normal_size:train_normal_size+valid_normal_size]
+                    dev_normal_data = normal_data[train_normal_size+valid_normal_size:train_normal_size+valid_normal_size+dev_normal_size]
+                    test_normal_data = normal_data[train_normal_size+valid_normal_size+dev_normal_size:]
 
-            train_loader = DataLoader(
-                dataset=train_dataset,
-                batch_size=batch_size,
-                pin_memory=True
-            )
-            valid_loader = DataLoader(
-                dataset=valid_dataset,
-                batch_size=batch_size,
-                pin_memory=True
-            )
-            test_loader = DataLoader(
-                dataset=test_dataset,
-                batch_size=batch_size,
-                pin_memory=True
-            )
-            
-            client_info.append({
-                "device": device_name,
-                "train_loader": train_loader,
-                "valid_loader": valid_loader,
-                "test_loader": test_loader,
-                "test_dataset": (processed_test_data, test_label),
-                "dev_normal_dataset": dev_normal_data,
-                "save_dir": os.path.join(f"Checkpoint/{network_size}/{no_Exp}/{run}/ClientModel", 
-                                    scen_name, model_type, update_type, device_name)
-            })
+                    data_processor = IoTDataProccessor(scaler="standard")
+                    processed_train_data, train_label = data_processor.fit_transform(train_normal_data)
+                    processed_valid_data, valid_label = data_processor.transform(valid_normal_data)
+                    processed_test_data, test_label = data_processor.transform(test_normal_data)
+                    processed_abnormal_data, abnormal_label = data_processor.transform(abnormal_data, type="abnormal")
+                    
+                    if new_device:
+                        processed_new_normal_data, new_normal_label = data_processor.transform(new_normal_data)
+                        processed_test_data = np.concatenate([processed_test_data, processed_new_normal_data], axis=0)
+                        processed_test_label = np.concatenate([test_label, new_normal_label], axis=0)
+                        test_dataset = IoTDataset(processed_test_data, processed_test_label)
+                    else:
+                        test_dataset = IoTDataset(processed_test_data, test_label)
+                    
+                    train_dataset = IoTDataset(processed_train_data, train_label)
+                    valid_dataset = IoTDataset(processed_valid_data, valid_label)
+                    abnormal_dataset = IoTDataset(processed_abnormal_data, abnormal_label)
+                    test_dataset = ConcatDataset([test_dataset, abnormal_dataset])
 
-        # Initialize clients with P2P
-        trainers = []
-        client_ids = list(range(len(client_info)))
-        
-        # Create development dataset from all clients' dev data
-        min_len = min([len(client['dev_normal_dataset']) for client in client_info])
-        dev_dataset = []
-        for client in client_info:
-            sample_data = client['dev_normal_dataset'].sample(n=min_len)
-            dev_dataset.append(sample_data)
-        dev_dataset = pd.concat(dev_dataset, axis=0)
-        
-        # Process development dataset
-        data_processor = IoTDataProccessor(scaler="standard")
-        processed_dev_data, _ = data_processor.fit_transform(dev_dataset)
-        
-        for i, client in enumerate(client_info):
-            client['save_dir'] = os.path.join(f"Checkpoint/{network_size}/{no_Exp}/{run}/ClientModel", 
-                                    scen_name, model_type, update_type, client['device'])
-            
-            # Create client trainer
-            if model_type == "hybrid":
-                model = Shrink_Autoencoder(input_dim=dim_features,
-                                         output_dim=dim_features,
-                                         shrink_lambda=shrink_lambda)
-            else:
-                model = Autoencoder(input_dim=dim_features,
-                                  output_dim=dim_features)
-            
-            trainer = ClientTrainer(
-                model=model,
-                loss_function=nn.MSELoss,
-                optimizer=torch.optim.Adam,
-                epoch=epoch,
-                batch_size=batch_size,
-                lr_rate=lr_rate,
-                update_type=update_type,
-                patience=global_patience,
-                save_dir=client['save_dir'],
-                client_id=i
-            )
-            
-            # Initialize development dataset for aggregation
-            trainer.create_dev_dataset({"dataset": processed_dev_data})
-            trainers.append(trainer)
+                    train_loader = DataLoader(
+                        dataset=train_dataset,
+                        batch_size=batch_size,
+                        pin_memory=True
+                    )
+                    valid_loader = DataLoader(
+                        dataset=valid_dataset,
+                        batch_size=batch_size,
+                        pin_memory=True
+                    )
+                    test_loader = DataLoader(
+                        dataset=test_dataset,
+                        batch_size=batch_size,
+                        pin_memory=True
+                    )
+                    
+                    client_info.append({
+                        "device": device_name,
+                        "train_loader": train_loader,
+                        "valid_loader": valid_loader,
+                        "test_loader": test_loader,
+                        "test_dataset": (processed_test_data, test_label),
+                        "dev_normal_dataset": dev_normal_data,
+                        "save_dir": os.path.join(f"Checkpoint/{network_size}/{no_Exp}/{run}/ClientModel", 
+                                            scen_name, model_type, update_type, device_name)
+                    })
 
-        # Connect clients in a peer-to-peer network
-        for i, client in enumerate(trainers):
-            # Connect to all other clients except self
-            peers = [c for j, c in enumerate(trainers) if j != i]
-            client.connect_to_peers(peers)
-            client.validation_data = torch.Tensor(processed_valid_data)
+                # Initialize clients with P2P
+                trainers = []
+                client_ids = list(range(len(client_info)))
+                
+                # Create development dataset from all clients' dev data
+                min_len = min([len(client['dev_normal_dataset']) for client in client_info])
+                dev_dataset = []
+                for client in client_info:
+                    sample_data = client['dev_normal_dataset'].sample(n=min_len)
+                    dev_dataset.append(sample_data)
+                dev_dataset = pd.concat(dev_dataset, axis=0)
+                
+                # Process development dataset
+                data_processor = IoTDataProccessor(scaler="standard")
+                processed_dev_data, _ = data_processor.fit_transform(dev_dataset)
+                
+                for i, client in enumerate(client_info):
+                    client['save_dir'] = os.path.join(f"Checkpoint/{network_size}/{no_Exp}/{run}/ClientModel", 
+                                            scen_name, model_type, update_type, client['device'])
+                    
+                    # Create client trainer
+                    if model_type == "hybrid":
+                        model = Shrink_Autoencoder(input_dim=dim_features,
+                                                 output_dim=dim_features,
+                                                 shrink_lambda=shrink_lambda)
+                    else:
+                        model = Autoencoder(input_dim=dim_features,
+                                          output_dim=dim_features)
+                    
+                    trainer = ClientTrainer(
+                        model=model,
+                        loss_function=nn.MSELoss,
+                        optimizer=torch.optim.Adam,
+                        epoch=epoch,
+                        batch_size=batch_size,
+                        lr_rate=lr_rate,
+                        update_type=update_type,
+                        patience=global_patience,
+                        save_dir=client['save_dir'],
+                        client_id=i
+                    )
+                    
+                    # Initialize development dataset for aggregation
+                    trainer.create_dev_dataset({"dataset": processed_dev_data})
+                    trainers.append(trainer)
 
-        # Training loop
-        for round in range(num_rounds):
-            logging.info(f"Starting round {round + 1}/{num_rounds}")
-            
-            # Train clients locally
-            for i, client in enumerate(trainers):
-                logging.info(f"Training client {i+1}...")
-                client.run(client_info[i]["train_loader"], client_info[i]["valid_loader"])
-                logging.info(f"Client {i+1} training done!")
-            
-            # Peer-to-peer model updates
-            logging.info("Starting peer-to-peer model updates...")
-            
-            # Each client broadcasts its model to peers
-            for client in trainers:
-                client.broadcast_model()
-            
-            # Each client updates its model based on received peer updates
-            for client in trainers:
-                client.update_from_peers()
-            
-            # Calculate metrics for each client model
-            logging.info("Calculating metrics for all models...")
-            client_metrics = []
-            for i, client in enumerate(trainers):
-                client_evaluator = Evaluator(client.model, model_type=model_type, metric=metric)
-                client_metric = client_evaluator.evaluate(client_info[i]["test_loader"], client_info[i]["train_loader"])
-                if isinstance(client_metric, tuple):
-                    client_metric = client_metric[0]
-                client_metrics.append(client_metric)
-                logging.info(f"Client {i+1} {metric} score: {client_metric}")
-            
-            # Save results
-            directory = f'Checkpoint/Results/Update/{network_size}/{no_Exp}/Run_{run}/{metric}'
-            if not os.path.exists(directory):
-                os.makedirs(directory)
-            
-            filename = f'{directory}/{scen_name}_{num_participants}_{model_type}_{update_type}_results.json'
-            with open(filename, 'a') as f:
-                json.dump({
-                    'round': round + 1,
-                    'client_metrics': [float(score) for score in client_metrics],
-                    'update_type': update_type,
-                    'model_type': model_type,
-                    'global_loss': min(client_metrics) if client_metrics else float('inf')
-                }, f)
-                f.write('\n')
-            
-            # Check early stopping
-            if min(client_metrics) < min_val_loss:
-                min_val_loss = min(client_metrics)
-                global_worse = 0
-            else:
-                global_worse += 1
-                if global_worse > global_patience:
-                    logging.info("Early stopping in global round!")
-                    break
-        
-        # After training loop, update best metrics
-        for i, trainer in enumerate(trainers):
-            client_evaluator = Evaluator(trainer.model, model_type=model_type, metric=metric)
-            client_metric = client_evaluator.evaluate(client_info[i]["test_loader"], 
-                                                    client_info[i]["train_loader"])
-            if isinstance(client_metric, tuple):
-                client_metric = client_metric[0]
-            best_metrics[model_type][update_type] = max(best_metrics[model_type][update_type], client_metric)
+                # Connect clients in a peer-to-peer network
+                for i, client in enumerate(trainers):
+                    # Connect to all other clients except self
+                    peers = [c for j, c in enumerate(trainers) if j != i]
+                    client.connect_to_peers(peers)
+                    client.validation_data = torch.Tensor(processed_valid_data)
 
-        # Clean up GPU memory after each combination
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            logging.info("Cleaned up GPU memory")
+                # Training loop
+                for round in range(num_rounds):
+                    logging.info(f"Starting round {round + 1}/{num_rounds}")
+                    
+                    # Train clients locally
+                    for i, client in enumerate(trainers):
+                        logging.info(f"Training client {i+1}...")
+                        client.run(client_info[i]["train_loader"], client_info[i]["valid_loader"])
+                        logging.info(f"Client {i+1} training done!")
+                    
+                    # Peer-to-peer model updates
+                    logging.info("Starting peer-to-peer model updates...")
+                    
+                    # Each client broadcasts its model to peers
+                    for client in trainers:
+                        client.broadcast_model()
+                    
+                    # Each client updates its model based on received peer updates
+                    for client in trainers:
+                        client.update_from_peers()
+                    
+                    # Calculate metrics for each client model
+                    logging.info("Calculating metrics for all models...")
+                    client_metrics = []
+                    for i, client in enumerate(trainers):
+                        client_evaluator = Evaluator(client.model, model_type=model_type, metric=metric)
+                        client_metric = client_evaluator.evaluate(client_info[i]["test_loader"], client_info[i]["train_loader"])
+                        if isinstance(client_metric, tuple):
+                            client_metric = client_metric[0]
+                        client_metrics.append(client_metric)
+                        logging.info(f"Client {i+1} {metric} score: {client_metric}")
+                    
+                    # Save results
+                    directory = f'Checkpoint/Results/Update/{network_size}/{no_Exp}/Run_{run}/{metric}'
+                    if not os.path.exists(directory):
+                        os.makedirs(directory)
+                    
+                    filename = f'{directory}/{scen_name}_{num_participants}_{model_type}_{update_type}_results.json'
+                    with open(filename, 'a') as f:
+                        json.dump({
+                            'round': round + 1,
+                            'client_metrics': [float(score) for score in client_metrics],
+                            'update_type': update_type,
+                            'model_type': model_type,
+                            'global_loss': min(client_metrics) if client_metrics else float('inf')
+                        }, f)
+                        f.write('\n')
+                    
+                    # Check early stopping
+                    if min(client_metrics) < min_val_loss:
+                        min_val_loss = min(client_metrics)
+                        global_worse = 0
+                    else:
+                        global_worse += 1
+                        if global_worse > global_patience:
+                            logging.info("Early stopping in global round!")
+                            break
+                
+                # After training loop, update best metrics
+                for i, trainer in enumerate(trainers):
+                    client_evaluator = Evaluator(trainer.model, model_type=model_type, metric=metric)
+                    client_metric = client_evaluator.evaluate(client_info[i]["test_loader"], 
+                                                            client_info[i]["train_loader"])
+                    if isinstance(client_metric, tuple):
+                        client_metric = client_metric[0]
+                    best_metrics[model_type][update_type] = max(best_metrics[model_type][update_type], client_metric)
+
+                # Clean up GPU memory after each combination
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    logging.info("Cleaned up GPU memory")
 
     # Print training summary
     logging.info("\nTraining Summary:")

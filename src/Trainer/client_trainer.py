@@ -39,12 +39,16 @@ class ClientTrainer(object):
         fedprox_mu (float, optional): The FedProx regularization parameter. Defaults to 0.001.
         client_id (str, optional): The ID of the client. Defaults to None.
         model_type (str, optional): The type of the model. Defaults to "hybrid".
+        verification_method (str, optional): The method for model verification. Defaults to "val".
+        verification_threshold (float, optional): The threshold for verification. Defaults to 3.0.
+        performance_threshold (float, optional): The threshold for performance. Defaults to 0.002.
     """
 
     def __init__(self, model=None, loss_function=nn.MSELoss, optimizer=torch.optim.Adam,
                     epoch=10, batch_size=100, lr_rate=1e-3, update_type="avg",
                     patience=3, save_dir="Checkpoint/ClientModel/", fedprox_mu=0.001, 
-                    client_id=None, model_type="hybrid") -> None:
+                    client_id=None, model_type="hybrid", verification_method="val", 
+                    verification_threshold=3.0, performance_threshold=0.002) -> None:
         
         if model is None:
             logging.info("Have to indicate the model to train.")
@@ -81,15 +85,24 @@ class ClientTrainer(object):
         self.dev_dataset = None  # Store development dataset for aggregation
         
         # Add verification components
-        self.verifier = ModelVerifier()
+        self.verifier = ModelVerifier(
+            verification_threshold=verification_threshold,
+            performance_threshold=performance_threshold,
+            verification_method=verification_method
+        )
         self.rejected_updates = 0
         self.max_rejected_updates = 3
         self.model_type = model_type  # Use the passed model_type parameter
 
     def create_dev_dataset(self, dataset):
         """Create development dataset for aggregation"""
-        self.dev_dataset = dataset["dataset"]
-        logging.info("Created development dataset for aggregation")
+        if isinstance(dataset["dataset"], np.ndarray):
+            self.dev_dataset = torch.Tensor(dataset["dataset"])
+        else:
+            self.dev_dataset = dataset["dataset"]
+        # Set the development dataset in the verifier
+        self.verifier.set_dev_dataset(self.dev_dataset)
+        logging.info("Created development dataset for aggregation and verification")
 
     def fed_avg(self, local_models):
         """Perform federated averaging"""

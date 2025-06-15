@@ -41,8 +41,10 @@ lr_rate = 1e-3
 shrink_lambda = 1 #5 #10
 network_size = 10 #50
 data_seed = 1234
-no_Exp = f"nonIID_Exp10_Rerun_{epoch}epoch_11client_lr0001_lamda{shrink_lambda}_ratio{num_participants*100}"
+no_Exp = f"nonIID_Exp122_Rerun_{epoch}epoch_10client_lr0001_lamda{shrink_lambda}_ratio{num_participants*100}"
 checkpoint_dir = f"Checkpoint/Results/Update/{network_size}/{no_Exp}"
+# Verification method selector
+verification_method = "dev"  # Options: "dev" or "val" - use development dataset or validation data for verification
 #no_Exp = f"IID-Update_Exp6_scale_{epoch}epoch_{network_size}client_{num_rounds}rounds_lr{lr_rate}_lamda{shrink_lambda}_ratio{num_participants*100}_dataseed{data_seed}"
 
 num_runs = 1 #5
@@ -61,7 +63,8 @@ dim_features = 115   #nba-iot: 115; cic-2023: 46
 scen_name = 'FL-IoT' 
 
 #config_file = f"Configuration/scen2-nba-iot-50clients.json"
-config_file = "Configuration/scen2-nba-iot-10clients_noniid.json"
+#config_file = "Configuration/scen2-nba-iot-10clients_noniid.json"
+config_file = "Configuration/scen2-nba-iot-10clients.json"
 #config_file = "Configuration/kitsune-iot-10clients.json"
 # config_file = "Configuration/cic-config.json"
 
@@ -239,7 +242,10 @@ if __name__ == "__main__":
                         patience=global_patience,
                         save_dir=client['save_dir'],
                         client_id=i,
-                        model_type=model_type
+                        model_type=model_type,
+                        verification_method=verification_method,
+                        verification_threshold=3.0,
+                        performance_threshold=0.002
                     )
                     
                     # Initialize development dataset for aggregation

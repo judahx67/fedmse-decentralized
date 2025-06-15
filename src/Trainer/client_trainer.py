@@ -14,6 +14,8 @@ import os
 import copy
 import numpy as np
 from collections import defaultdict
+from .model_verifier import ModelVerifier
+from Model import Shrink_Autoencoder, Autoencoder
 
 import logging
 
@@ -34,11 +36,15 @@ class ClientTrainer(object):
         lr_rate (float, optional): The learning rate for the optimizer. Defaults to 1e-3.
         patience (int, optional): The number of epochs to wait for improvement in validation loss before early stopping. Defaults to 5.
         save_dir (str, optional): The directory to save the trained model and training tracking information. Defaults to "Checkpoint/ClientModel/".
+        fedprox_mu (float, optional): The FedProx regularization parameter. Defaults to 0.001.
+        client_id (str, optional): The ID of the client. Defaults to None.
+        model_type (str, optional): The type of the model. Defaults to "hybrid".
     """
 
     def __init__(self, model=None, loss_function=nn.MSELoss, optimizer=torch.optim.Adam,
                     epoch=10, batch_size=100, lr_rate=1e-3, update_type="avg",
-                    patience=3, save_dir="Checkpoint/ClientModel/", fedprox_mu=0.001, client_id=None) -> None:
+                    patience=3, save_dir="Checkpoint/ClientModel/", fedprox_mu=0.001, 
+                    client_id=None, model_type="hybrid") -> None:
         
         if model is None:
             logging.info("Have to indicate the model to train.")
@@ -73,6 +79,12 @@ class ClientTrainer(object):
         self.received_models = {}  # Store received model updates from peers
         self.validation_data = None  # Store validation data for aggregation
         self.dev_dataset = None  # Store development dataset for aggregation
+        
+        # Add verification components
+        self.verifier = ModelVerifier()
+        self.rejected_updates = 0
+        self.max_rejected_updates = 3
+        self.model_type = model_type  # Use the passed model_type parameter
 
     def create_dev_dataset(self, dataset):
         """Create development dataset for aggregation"""
@@ -147,17 +159,35 @@ class ClientTrainer(object):
         return aggregated_state
 
     def update_from_peers(self):
-        """Update model based on received peer updates"""
+        """Update model based on received peer updates with verification"""
         if not self.received_models:
             return
-        
+            
         aggregated_state = self.request_aggregation()
         if aggregated_state:
-            self.model.load_state_dict(aggregated_state)
-            self.previous_global_model = copy.deepcopy(self.model)
-            logging.info("Model updated from peer aggregation")
-        
-        # Clear received models after update
+            # Verify the aggregated model
+            is_verified, performance_change = self.verifier.verify_model(
+                self.client_id,
+                aggregated_state,
+                self.validation_data,
+                self.current_round,
+                self.model_type
+            )
+            
+            if is_verified:
+                self.model.load_state_dict(aggregated_state)
+                self.previous_global_model = copy.deepcopy(self.model)
+                self.rejected_updates = 0  # Reset counter on successful update
+                logging.info(f"Model verified and updated. Performance change: {performance_change:.4f}")
+            else:
+                self.rejected_updates += 1
+                logging.warning(f"Model update rejected. Performance change: {performance_change:.4f}")
+                
+                if self.rejected_updates >= self.max_rejected_updates:
+                    logging.error("Too many rejected updates. Possible attack detected.")
+                    # Implement additional security measures here
+                    
+        # Clear received models after update attempt
         self.received_models.clear()
 
     def calculate_mse_score(self, validation_data):

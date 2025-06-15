@@ -36,15 +36,16 @@ logging.basicConfig(level=logging.INFO,  # Set the logging level (DEBUG, INFO, W
 
 num_participants = 0.5 # 0.5
 epoch = 5 #5 #100
-num_rounds = 5 #5 #20
+num_rounds = 3 #5 #20
 lr_rate = 1e-3
 shrink_lambda = 1 #5 #10
 network_size = 10 #50
 data_seed = 1234
-no_Exp = f"nonIID_Exp10_Rerun_{epoch}epoch_10client_lr0001_lamda{shrink_lambda}_ratio{num_participants*100}"
+no_Exp = f"nonIID_Exp10_Rerun_{epoch}epoch_11client_lr0001_lamda{shrink_lambda}_ratio{num_participants*100}"
+checkpoint_dir = f"Checkpoint/Results/Update/{network_size}/{no_Exp}"
 #no_Exp = f"IID-Update_Exp6_scale_{epoch}epoch_{network_size}client_{num_rounds}rounds_lr{lr_rate}_lamda{shrink_lambda}_ratio{num_participants*100}_dataseed{data_seed}"
 
-num_runs = 2 #5
+num_runs = 1 #5
 batch_size = 12
 
 new_device = True
@@ -237,7 +238,8 @@ if __name__ == "__main__":
                         update_type=update_type,
                         patience=global_patience,
                         save_dir=client['save_dir'],
-                        client_id=i
+                        client_id=i,
+                        model_type=model_type
                     )
                     
                     # Initialize development dataset for aggregation
@@ -269,9 +271,31 @@ if __name__ == "__main__":
                         client.broadcast_model()
                     
                     # Each client updates its model based on received peer updates
-                    for client in trainers:
+                    verification_results = []
+                    for i, client in enumerate(trainers):
                         client.update_from_peers()
+                        verification_results.append({
+                            'client_id': i,
+                            'rejected_updates': client.rejected_updates,
+                            'is_verified': client.rejected_updates == 0
+                        })
                     
+                    # Log verification results
+                    logging.info("Verification results for this round:")
+                    for result in verification_results:
+                        logging.info(f"Client {result['client_id']}: {'Verified' if result['is_verified'] else 'Rejected'} "
+                                    f"(Rejected updates: {result['rejected_updates']})")
+                    
+                    # Save verification results
+                    verification_file = f'{checkpoint_dir}/Run_{run}/verification_results.json'
+                    os.makedirs(os.path.dirname(verification_file), exist_ok=True)  # Create directory if it doesn't exist
+                    with open(verification_file, 'a') as f:
+                        json.dump({
+                            'round': round + 1,
+                            'verification_results': verification_results
+                        }, f)
+                        f.write('\n')
+
                     # Calculate metrics for each client model
                     logging.info("Calculating metrics for all models...")
                     client_metrics = []

@@ -175,31 +175,32 @@ class ClientTrainer(object):
         """Update model based on received peer updates with verification"""
         if not self.received_models:
             return
+        
+        # Get the aggregated model from the aggregator
+        aggregated_state = list(self.received_models.values())[0]  # Should only have one model from aggregator
+        
+        # Verify the aggregated model
+        is_verified, performance_change = self.verifier.verify_model(
+            self.client_id,
+            aggregated_state,
+            self.validation_data,
+            self.current_round,
+            self.model_type
+        )
+        
+        if is_verified:
+            self.model.load_state_dict(aggregated_state)
+            self.previous_global_model = copy.deepcopy(self.model)
+            self.rejected_updates = 0  # Reset counter on successful update
+            logging.info(f"Model verified and updated. Performance change: {performance_change:.4f}")
+        else:
+            self.rejected_updates += 1
+            logging.warning(f"Model update rejected. Performance change: {performance_change:.4f}")
             
-        aggregated_state = self.request_aggregation()
-        if aggregated_state:
-            # Verify the aggregated model
-            is_verified, performance_change = self.verifier.verify_model(
-                self.client_id,
-                aggregated_state,
-                self.validation_data,
-                self.current_round,
-                self.model_type
-            )
-            
-            if is_verified:
-                self.model.load_state_dict(aggregated_state)
-                self.previous_global_model = copy.deepcopy(self.model)
-                self.rejected_updates = 0  # Reset counter on successful update
-                logging.info(f"Model verified and updated. Performance change: {performance_change:.4f}")
-            else:
-                self.rejected_updates += 1
-                logging.warning(f"Model update rejected. Performance change: {performance_change:.4f}")
-                
-                if self.rejected_updates >= self.max_rejected_updates:
-                    logging.error("Too many rejected updates. Possible attack detected.")
-                    # Implement additional security measures here
-                    
+            if self.rejected_updates >= self.max_rejected_updates:
+                logging.error("Too many rejected updates. Possible attack detected.")
+                # Implement additional security measures here
+        
         # Clear received models after update attempt
         self.received_models.clear()
 
@@ -254,29 +255,27 @@ class ClientTrainer(object):
             current_round (int): Current round number
             
         Returns:
-            ClientTrainer: Selected aggregator
+            ClientTrainer: Selected aggregator or None if no valid aggregator found
         """
-        # Reset votes for new round
-        if current_round != self.current_round:
-            self.current_round = current_round
-            self.has_aggregated_this_round = False
-            self.votes_received = 0
+        # Update current round for all clients
+        for client in clients:
+            client.current_round = current_round
+            client.has_aggregated_this_round = False
         
         # Calculate MSE scores for all clients
         mse_scores = []
-        for i, client in enumerate(clients, 1):
+        for client in clients:
             if client != self:  # Don't vote for self
                 mse_score = client.calculate_mse_score(validation_data)
                 mse_scores.append((client, mse_score))
-                logging.info(f"Client {i} MSE score: {mse_score:.6f}")
+                logging.info(f"Client {clients.index(client) + 1} MSE score: {mse_score:.6f}")
         
         # Sort by MSE score (lower is better)
         mse_scores.sort(key=lambda x: x[1])
         
         # Vote for the client with lowest MSE that hasn't exceeded aggregation threshold
         for client, mse_score in mse_scores:
-            if (client.aggregation_count < client.max_aggregation_threshold and 
-                not client.has_aggregated_this_round):
+            if client.aggregation_count < client.max_aggregation_threshold:
                 client.votes_received += 1
                 client_index = clients.index(client) + 1
                 logging.info(f"Voting for Client {client_index} with MSE score: {mse_score:.6f}")
@@ -286,7 +285,7 @@ class ClientTrainer(object):
     
     def aggregate_models(self, clients, validation_data, current_round):
         """
-        Aggregate models from all clients using MSE-based weights.
+        Aggregate models from all clients using the specified update type.
         
         Args:
             clients (list): List of ClientTrainer instances
@@ -294,35 +293,44 @@ class ClientTrainer(object):
             current_round (int): Current round number
             
         Returns:
-            dict: Aggregated model state dict
+            dict: Aggregated model state dict or None if aggregation not possible
         """
         # Check if this client should perform aggregation
         if (self.aggregation_count >= self.max_aggregation_threshold or 
-            self.has_aggregated_this_round or 
-            current_round != self.current_round):
+            self.has_aggregated_this_round):
             logging.warning("This client cannot perform aggregation in this round")
             return None
             
-        # Calculate MSE scores and weights for all clients
-        weights = []
-        total_weight = 0
-        
+        # Collect all client models
+        local_models = []
         for client in clients:
-            mse_score = client.calculate_mse_score(validation_data)
-            weight = 1.0 / (mse_score + 1e-10)  # Add small epsilon to avoid division by zero
-            weights.append((client.model.state_dict(), weight))
-            total_weight += weight
+            model_state = client.model.state_dict()
+            if self.update_type == "mse_avg":
+                # Calculate weight based on MSE score
+                mse_score = client.calculate_mse_score(validation_data)
+                weight = 1.0 / (mse_score + 1e-10)
+            else:
+                weight = 1.0  # Equal weight for avg and fedprox
+            local_models.append((model_state, weight))
         
-        # Normalize weights
-        weights = [(state_dict, weight/total_weight) for state_dict, weight in weights]
+        # Perform aggregation based on update type
+        if self.update_type == "avg":
+            aggregated_state = self.fed_avg(local_models)
+        elif self.update_type == "mse_avg":
+            aggregated_state = self.fed_mse_avg(local_models)
+        elif self.update_type == "fedprox":
+            aggregated_state = self.fedprox(local_models)
+        else:
+            logging.error(f"Unknown update type: {self.update_type}")
+            return None
         
-        # Aggregate models
-        aggregated_state = {}
-        for key in weights[0][0].keys():
-            aggregated_state[key] = sum(state_dict[key] * weight for state_dict, weight in weights)
-        
+        # Update aggregation tracking
         self.aggregation_count += 1
         self.has_aggregated_this_round = True
+        
+        # Update this client's model with the aggregated state
+        self.model.load_state_dict(aggregated_state)
+        
         return aggregated_state
     
     def save_model(self):

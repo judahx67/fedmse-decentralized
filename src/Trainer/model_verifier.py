@@ -77,7 +77,6 @@ class ModelVerifier:
         return is_verified, performance_change
         
     def _calculate_parameter_changes(self, old_state, new_state):
-        """Calculate the magnitude of parameter changes"""
         total_change = 0
         for key in old_state.keys():
             change = torch.norm(old_state[key] - new_state[key])
@@ -85,7 +84,6 @@ class ModelVerifier:
         return total_change
         
     def _evaluate_model(self, model_state, verification_data, model_type):
-        """Evaluate model performance on verification data"""
         # Create appropriate model based on type
         if model_type == "hybrid":
             model = Shrink_Autoencoder(input_dim=verification_data.shape[1], output_dim=verification_data.shape[1])
@@ -98,4 +96,5 @@ class ModelVerifier:
         with torch.no_grad():
             _, generated_data, _ = model(verification_data)
             mse = torch.nn.MSELoss()(verification_data, generated_data)
-            return 1.0 / (1.0 + mse)  # Convert to a score where higher is better 
+            return 1.0 / (1.0 + mse)  
+        

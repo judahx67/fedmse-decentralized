@@ -35,19 +35,19 @@ logging.basicConfig(level=logging.INFO,  # Set the logging level (DEBUG, INFO, W
 
 
 num_participants = 0.5 # 0.5
-epoch = 5 #5 #100
-num_rounds = 3 #5 #20
+epoch = 100 #5 #100
+num_rounds = 20 #5 #20
 lr_rate = 1e-3
-shrink_lambda = 1 #5 #10
+shrink_lambda = 10 #5 #10
 network_size = 10 #50
 data_seed = 1234
-no_Exp = f"nonIID_Exp122_Rerun_{epoch}epoch_10client_lr0001_lamda{shrink_lambda}_ratio{num_participants*100}"
+no_Exp = f"nonIID_Exp18_Rerun_{epoch}epoch_10client_lr0001_lamda{shrink_lambda}_ratio{num_participants*100}"
 checkpoint_dir = f"Checkpoint/Results/Update/{network_size}/{no_Exp}"
 # Verification method selector
-verification_method = "dev"  # Options: "dev" or "val" - use development dataset or validation data for verification
+verification_method = "val"  # Options: "dev" or "val" - use development dataset or validation data for verification
 #no_Exp = f"IID-Update_Exp6_scale_{epoch}epoch_{network_size}client_{num_rounds}rounds_lr{lr_rate}_lamda{shrink_lambda}_ratio{num_participants*100}_dataseed{data_seed}"
 
-num_runs = 1 #5
+num_runs = 10 #5
 batch_size = 12
 
 new_device = True
@@ -62,10 +62,11 @@ dim_features = 115   #nba-iot: 115; cic-2023: 46
 
 scen_name = 'FL-IoT' 
 
+#config_file = "Configuration/kitsune-iot-10clients.json"
+config_file = "Configuration/kitsune-iot-10clients_noniid.json"
 #config_file = f"Configuration/scen2-nba-iot-50clients.json"
 #config_file = "Configuration/scen2-nba-iot-10clients_noniid.json"
-config_file = "Configuration/scen2-nba-iot-10clients.json"
-#config_file = "Configuration/kitsune-iot-10clients.json"
+#config_file = "Configuration/scen2-nba-iot-10clients.json"
 # config_file = "Configuration/cic-config.json"
 
 def set_seeds(seed):
@@ -199,7 +200,8 @@ if __name__ == "__main__":
                         "test_dataset": (processed_test_data, test_label),
                         "dev_normal_dataset": dev_normal_data,
                         "save_dir": os.path.join(f"Checkpoint/{network_size}/{no_Exp}/{run}/ClientModel", 
-                                            scen_name, model_type, update_type, device_name)
+                                            scen_name, model_type, update_type, device_name),
+                        "validation_data": torch.Tensor(processed_valid_data)
                     })
 
                 # Initialize clients with P2P
@@ -269,38 +271,55 @@ if __name__ == "__main__":
                         client.run(client_info[i]["train_loader"], client_info[i]["valid_loader"])
                         logging.info(f"Client {i+1} training done!")
                     
-                    # Peer-to-peer model updates
-                    logging.info("Starting peer-to-peer model updates...")
-                    
-                    # Each client broadcasts its model to peers
+                    # Voting for aggregator
+                    logging.info("Starting voting for aggregator...")
+                    aggregator = None
                     for client in trainers:
-                        client.broadcast_model()
+                        selected_aggregator = client.vote_for_aggregator(trainers, client_info[0]["validation_data"], round)
+                        if selected_aggregator:
+                            aggregator = selected_aggregator
+                            break
                     
-                    # Each client updates its model based on received peer updates
-                    verification_results = []
-                    for i, client in enumerate(trainers):
-                        client.update_from_peers()
-                        verification_results.append({
-                            'client_id': i,
-                            'rejected_updates': client.rejected_updates,
-                            'is_verified': client.rejected_updates == 0
-                        })
-                    
-                    # Log verification results
-                    logging.info("Verification results for this round:")
-                    for result in verification_results:
-                        logging.info(f"Client {result['client_id']}: {'Verified' if result['is_verified'] else 'Rejected'} "
-                                    f"(Rejected updates: {result['rejected_updates']})")
-                    
-                    # Save verification results
-                    verification_file = f'{checkpoint_dir}/Run_{run}/verification_results.json'
-                    os.makedirs(os.path.dirname(verification_file), exist_ok=True)  # Create directory if it doesn't exist
-                    with open(verification_file, 'a') as f:
-                        json.dump({
-                            'round': round + 1,
-                            'verification_results': verification_results
-                        }, f)
-                        f.write('\n')
+                    if aggregator:
+                        logging.info(f"Client {trainers.index(aggregator) + 1} selected as aggregator")
+                        
+                        # Aggregator performs aggregation
+                        aggregated_state = aggregator.aggregate_models(trainers, client_info[0]["validation_data"], round)
+                        
+                        if aggregated_state:
+                            # Broadcast aggregated model to all clients
+                            for client in trainers:
+                                if client != aggregator:  # Don't send to aggregator as they already have it
+                                    client.receive_model(aggregator, aggregated_state)
+                            
+                            # Clients verify and update their models
+                            verification_results = []
+                            for i, client in enumerate(trainers):
+                                if client != aggregator:  # Aggregator already has the model
+                                    client.update_from_peers()
+                                    verification_results.append({
+                                        'client_id': i,
+                                        'rejected_updates': client.rejected_updates,
+                                        'is_verified': client.rejected_updates == 0
+                                    })
+                            
+                            # Log verification results
+                            logging.info("Verification results for this round:")
+                            for result in verification_results:
+                                logging.info(f"Client {result['client_id']}: {'Verified' if result['is_verified'] else 'Rejected'} "
+                                            f"(Rejected updates: {result['rejected_updates']})")
+                            
+                            # Save verification results
+                            verification_file = f'{checkpoint_dir}/Run_{run}/verification_results.json'
+                            os.makedirs(os.path.dirname(verification_file), exist_ok=True)
+                            with open(verification_file, 'a') as f:
+                                json.dump({
+                                    'round': round + 1,
+                                    'verification_results': verification_results
+                                }, f)
+                                f.write('\n')
+                    else:
+                        logging.warning("No aggregator selected for this round")
 
                     # Calculate metrics for each client model
                     logging.info("Calculating metrics for all models...")

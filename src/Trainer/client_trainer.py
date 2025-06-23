@@ -192,7 +192,8 @@ class ClientTrainer(object):
             self.model.load_state_dict(aggregated_state)
             self.previous_global_model = copy.deepcopy(self.model)
             self.rejected_updates = 0  # Reset counter on successful update
-            logging.info(f"[Client {self.client_id}] Model verified and updated.")  # Performance change: {performance_change:.10f}"
+            logging.info(f"[Client {self.client_id}] Model verified and updated. Performance change: {performance_change:.10f}")  # Performance change: {performance_change:.10f}"
+            
         else:
             self.rejected_updates += 1
             logging.warning(f"[Client {self.client_id}] Model update rejected. Performance change: {performance_change:.10f}")

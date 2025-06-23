@@ -36,9 +36,9 @@ logging.basicConfig(level=logging.INFO,  # Set the logging level (DEBUG, INFO, W
 
 num_participants = 0.5 # 0.5
 epoch = 5 #5 #100
-num_rounds = 20 #5 #20
+num_rounds = 3 #5 #20
 lr_rate = 1e-3
-shrink_lambda = 10 #5 #10
+shrink_lambda = 5 #5 #10
 network_size = 10 #50
 data_seed = 1234
 no_Exp = f"nonIID_Exp21_Rerun_{epoch}epoch_10client_lr0001_lamda{shrink_lambda}_ratio{num_participants*100}"
@@ -266,51 +266,55 @@ if __name__ == "__main__":
                 # Training loop
                 for round in range(num_rounds):
                     logging.info(f"Starting round {round + 1}/{num_rounds}")
-                    
-                    # Train clients locally
-                    for i, client in enumerate(trainers):
-                        logging.info(f"Training client {i+1}...")
-                        client.run(client_info[i]["train_loader"], client_info[i]["valid_loader"])
-                        logging.info(f"Client {i+1} training done!")
-                    
-                    # Voting for aggregator
+                    # Select a subset of clients for this round
+                    num_selected = max(1, int(num_participants * len(trainers)))
+                    selected_indices = random.sample(range(len(trainers)), num_selected)
+                    selected_trainers = [trainers[i] for i in selected_indices]
+                    selected_client_info = [client_info[i] for i in selected_indices]
+
+                    # Train only the selected clients
+                    for i, client in enumerate(selected_trainers):
+                        logging.info(f"Training client {selected_indices[i]+1}...")
+                        client.run(selected_client_info[i]["train_loader"], selected_client_info[i]["valid_loader"])
+                        logging.info(f"Client {selected_indices[i]+1} training done!")
+
+                    # Voting for aggregator (only among selected clients)
                     logging.info("Starting voting for aggregator...")
                     aggregator = None
-                    for client in trainers:
-                        selected_aggregator = client.vote_for_aggregator(trainers, client_info[0]["validation_data"], round)
+                    for client in selected_trainers:
+                        selected_aggregator = client.vote_for_aggregator(selected_trainers, selected_client_info[0]["validation_data"], round)
                         if selected_aggregator:
                             aggregator = selected_aggregator
                             break
                     
                     if aggregator:
                         logging.info(f"Client {trainers.index(aggregator) + 1} selected as aggregator")
-                        
                         # Aggregator performs aggregation
-                        aggregated_state = aggregator.aggregate_models(trainers, client_info[0]["validation_data"], round)
-                        
+                        aggregated_state = aggregator.aggregate_models(selected_trainers, selected_client_info[0]["validation_data"], round)
                         if aggregated_state:
-                            # Broadcast aggregated model to all clients
+                            #  # Broadcast aggregated model to all selected clients
+                            # for client in selected_trainers:
+                            # NEW: Broadcast aggregated model to all clients
                             for client in trainers:
                                 if client != aggregator:  # Don't send to aggregator as they already have it
                                     client.receive_model(aggregator, aggregated_state)
-                            
                             # Clients verify and update their models
                             verification_results = []
+                            # for i, client in enumerate(selected_trainers):
                             for i, client in enumerate(trainers):
                                 if client != aggregator:  # Aggregator already has the model
                                     client.update_from_peers()
                                     verification_results.append({
+                                        # 'client_id': selected_indices[i],
                                         'client_id': i,
                                         'rejected_updates': client.rejected_updates,
                                         'is_verified': client.rejected_updates == 0
                                     })
-                            
                             # Log verification results
                             logging.info("Verification results for this round:")
                             for result in verification_results:
                                 logging.info(f"Client {result['client_id']}: {'Verified' if result['is_verified'] else 'Rejected'} "
                                             f"(Rejected updates: {result['rejected_updates']})")
-                            
                             # Save verification results
                             verification_file = f'{checkpoint_dir}/Run_{run}/verification_results.json'
                             os.makedirs(os.path.dirname(verification_file), exist_ok=True)
@@ -323,7 +327,7 @@ if __name__ == "__main__":
                     else:
                         logging.warning("No aggregator selected for this round")
 
-                    # Calculate metrics for each client model
+                    # Calculate metrics for each client model (all clients, not just selected)
                     logging.info("Calculating metrics for all models...")
                     client_metrics = []
                     for i, client in enumerate(trainers):

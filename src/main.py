@@ -35,19 +35,20 @@ logging.basicConfig(level=logging.INFO,  # Set the logging level (DEBUG, INFO, W
 
 
 num_participants = 0.5 # 0.5
-epoch = 100 #5 #100
+epoch = 5 #5 #100
 num_rounds = 20 #5 #20
 lr_rate = 1e-3
 shrink_lambda = 10 #5 #10
 network_size = 10 #50
 data_seed = 1234
-no_Exp = f"nonIID_Exp18_Rerun_{epoch}epoch_10client_lr0001_lamda{shrink_lambda}_ratio{num_participants*100}"
+no_Exp = f"nonIID_Exp21_Rerun_{epoch}epoch_10client_lr0001_lamda{shrink_lambda}_ratio{num_participants*100}"
+#no_Exp = f"IID-Update_Exp6_scale_{epoch}epoch_{network_size}client_{num_rounds}rounds_lr{lr_rate}_lamda{shrink_lambda}_ratio{num_participants*100}_dataseed{data_seed}"
 checkpoint_dir = f"Checkpoint/Results/Update/{network_size}/{no_Exp}"
+
 # Verification method selector
 verification_method = "val"  # Options: "dev" or "val" - use development dataset or validation data for verification
-#no_Exp = f"IID-Update_Exp6_scale_{epoch}epoch_{network_size}client_{num_rounds}rounds_lr{lr_rate}_lamda{shrink_lambda}_ratio{num_participants*100}_dataseed{data_seed}"
 
-num_runs = 10 #5
+num_runs = 1 #5
 batch_size = 12
 
 new_device = True
@@ -62,8 +63,8 @@ dim_features = 115   #nba-iot: 115; cic-2023: 46
 
 scen_name = 'FL-IoT' 
 
-#config_file = "Configuration/kitsune-iot-10clients.json"
-config_file = "Configuration/kitsune-iot-10clients_noniid.json"
+config_file = "Configuration/kitsune-iot-10clients.json"
+#config_file = "Configuration/kitsune-iot-10clients_noniid.json"
 #config_file = f"Configuration/scen2-nba-iot-50clients.json"
 #config_file = "Configuration/scen2-nba-iot-10clients_noniid.json"
 #config_file = "Configuration/scen2-nba-iot-10clients.json"
@@ -179,7 +180,8 @@ if __name__ == "__main__":
                     train_loader = DataLoader(
                         dataset=train_dataset,
                         batch_size=batch_size,
-                        pin_memory=True
+                        pin_memory = torch.cuda.is_available()
+                        #pin_memory=True
                     )
                     valid_loader = DataLoader(
                         dataset=valid_dataset,
@@ -377,7 +379,7 @@ if __name__ == "__main__":
     logging.info("="*50)
     for model_type in model_types:
         for update_type in update_types:
-            logging.info(f"{model_type} + {update_type}: Best {metric} = {best_metrics[model_type][update_type]:.4f}")
+            logging.info(f"{model_type} + {update_type}: Best {metric} = {best_metrics[model_type][update_type]:.10f}")
     logging.info("="*50)
 
     # Save summary to file

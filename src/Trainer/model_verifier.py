@@ -65,7 +65,7 @@ class ModelVerifier:
         }
         
         # Log the actual values for debugging
-        logging.info(f"Client {client_id} - Param changes: {param_changes:.6f}, Performance change: {performance_change:.6f}")
+        logging.info(f"Client {client_id} - Param changes: {param_changes:.10f}, Performance change: {performance_change:.10f}")
         logging.info(f"Using {self.verification_method} dataset for verification")
         
         # Verify based on both parameter changes and performance

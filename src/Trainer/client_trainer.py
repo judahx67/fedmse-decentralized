@@ -46,17 +46,17 @@ class ClientTrainer(object):
 
     def __init__(self, model=None, loss_function=nn.MSELoss, optimizer=torch.optim.Adam,
                     epoch=10, batch_size=100, lr_rate=1e-3, update_type="avg",
-                    patience=3, save_dir="Checkpoint/ClientModel/", fedprox_mu=0.001, 
+                    patience=5, save_dir="Checkpoint/ClientModel/", fedprox_mu=0.001, 
                     client_id=None, model_type="hybrid", verification_method="val", 
                     verification_threshold=3.0, performance_threshold=0.002) -> None:
         
         if model is None:
-            logging.info("Have to indicate the model to train.")
+            logging.info(f"[Client {client_id}] Have to indicate the model to train.")
             return None
         
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
-            logging.info("Created saving dir.")
+            logging.info(f"[Client {client_id}] Created saving dir.")
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = model.to(self.device)
@@ -102,7 +102,7 @@ class ClientTrainer(object):
             self.dev_dataset = dataset["dataset"]
         # Set the development dataset in the verifier
         self.verifier.set_dev_dataset(self.dev_dataset)
-        logging.info("Created development dataset for aggregation and verification")
+        logging.info(f"[Client {self.client_id}] Created development dataset for aggregation and verification")
 
     def fed_avg(self, local_models):
         """Perform federated averaging"""
@@ -136,19 +136,19 @@ class ClientTrainer(object):
     def connect_to_peers(self, peers):
         """Connect to peer clients for P2P communication"""
         self.peers = peers
-        logging.info(f"Connected to {len(peers)} peers")
+        logging.info(f"[Client {self.client_id}] Connected to {len(peers)} peers")
 
     def broadcast_model(self):
         """Broadcast current model to all peers"""
         model_state = self.model.state_dict()
         for peer in self.peers:
             peer.receive_model(self, model_state)
-        logging.info("Model broadcasted to all peers")
+        logging.info(f"[Client {self.client_id}] Model broadcasted to all peers")
 
     def receive_model(self, sender, model_state):
         """Receive model update from a peer"""
         self.received_models[sender] = model_state
-        logging.info(f"Received model from peer {sender}")
+        logging.info(f"[Client {self.client_id}] Received model from peer {sender}")
 
     def request_aggregation(self):
         """Request aggregation from peers"""
@@ -164,7 +164,7 @@ class ClientTrainer(object):
         elif self.update_type == "fedprox":
             aggregated_state = self.fedprox(local_models)
         else:
-            logging.error(f"Unknown update type: {self.update_type}")
+            logging.error(f"[Client {self.client_id}] Unknown update type: {self.update_type}")
             return None
         
         self.aggregation_count += 1
@@ -192,13 +192,13 @@ class ClientTrainer(object):
             self.model.load_state_dict(aggregated_state)
             self.previous_global_model = copy.deepcopy(self.model)
             self.rejected_updates = 0  # Reset counter on successful update
-            logging.info(f"Model verified and updated. Performance change: {performance_change:.4f}")
+            logging.info(f"[Client {self.client_id}] Model verified and updated.")  # Performance change: {performance_change:.10f}"
         else:
             self.rejected_updates += 1
-            logging.warning(f"Model update rejected. Performance change: {performance_change:.4f}")
+            logging.warning(f"[Client {self.client_id}] Model update rejected. Performance change: {performance_change:.10f}")
             
             if self.rejected_updates >= self.max_rejected_updates:
-                logging.error("Too many rejected updates. Possible attack detected.")
+                logging.error(f"[Client {self.client_id}] Too many rejected updates. Possible attack detected.")
                 # Implement additional security measures here
         
         # Clear received models after update attempt
@@ -268,7 +268,7 @@ class ClientTrainer(object):
             if client != self:  # Don't vote for self
                 mse_score = client.calculate_mse_score(validation_data)
                 mse_scores.append((client, mse_score))
-                logging.info(f"Client {clients.index(client) + 1} MSE score: {mse_score:.6f}")
+                logging.info(f"[Client {self.client_id}] Client {clients.index(client) + 1} MSE score: {mse_score:.6f}")
         
         # Sort by MSE score (lower is better)
         mse_scores.sort(key=lambda x: x[1])
@@ -278,7 +278,7 @@ class ClientTrainer(object):
             if client.aggregation_count < client.max_aggregation_threshold:
                 client.votes_received += 1
                 client_index = clients.index(client) + 1
-                logging.info(f"Voting for Client {client_index} with MSE score: {mse_score:.6f}")
+                logging.info(f"[Client {self.client_id}] Voting for Client {client_index} with MSE score: {mse_score:.6f}")
                 return client
         
         return None
@@ -298,7 +298,7 @@ class ClientTrainer(object):
         # Check if this client should perform aggregation
         if (self.aggregation_count >= self.max_aggregation_threshold or 
             self.has_aggregated_this_round):
-            logging.warning("This client cannot perform aggregation in this round")
+            logging.warning(f"[Client {self.client_id}] This client cannot perform aggregation in this round")
             return None
             
         # Collect all client models
@@ -321,7 +321,7 @@ class ClientTrainer(object):
         elif self.update_type == "fedprox":
             aggregated_state = self.fedprox(local_models)
         else:
-            logging.error(f"Unknown update type: {self.update_type}")
+            logging.error(f"[Client {self.client_id}] Unknown update type: {self.update_type}")
             return None
         
         # Update aggregation tracking
@@ -337,7 +337,7 @@ class ClientTrainer(object):
         """
         Save the trained model to the specified directory.
         """
-        logging.info("Saving model to {}".format(self.save_dir))
+        logging.info(f"[Client {self.client_id}] Saving model to {self.save_dir}")
         save_file = os.path.join(self.save_dir, "model.cpt")
         try:
             torch.save(
@@ -365,7 +365,8 @@ class ClientTrainer(object):
         for epoch in range(self.epoch):
             self.model.train()
             epoch_loss = 0
-            for i, batch_input in zip(tqdm(range(len(train_loader)), desc='Training batch: ...'), train_loader):
+            # for i, batch_input in zip(tqdm(range(len(train_loader)), desc='Training batch: ...'), train_loader):
+            for i, batch_input in enumerate(train_loader):
                 _, _, loss = self.model(batch_input[0].to(self.device))
                 
                 # Add proximal term for FedProx
@@ -386,7 +387,8 @@ class ClientTrainer(object):
                 valid_loss = 0
                 self.model.eval()
                 with torch.no_grad():
-                    for i, batch_input in zip(tqdm(range(len(valid_loader)), desc='Validating batch: ...'), valid_loader):
+                    # for i, batch_input in zip(tqdm(range(len(valid_loader)), desc='Validating batch: ...'), valid_loader):
+                    for i, batch_input in enumerate(valid_loader):
                         _, _, loss = self.model(batch_input[0].to(self.device))
                         
                         # Add proximal term for FedProx validation
@@ -400,7 +402,7 @@ class ClientTrainer(object):
                     
                     valid_loss = valid_loss / len(valid_loader)
                     training_tracking.append((epoch_loss, valid_loss))
-                    logging.info(f"Epoch {epoch+1} - Training loss: {epoch_loss} - Validating loss: {valid_loss}")
+                    logging.info(f"[Client {self.client_id}] Epoch {epoch+1} - Training loss: {epoch_loss} - Validating loss: {valid_loss}")
 
                 if valid_loss < min_valid_loss:
                     min_valid_loss = valid_loss
@@ -409,7 +411,7 @@ class ClientTrainer(object):
                 else:
                     worse_count += 1
                     if worse_count >= self.patience:
-                        logging.info(f"Early stopping in epoch {epoch+1}.")
+                        logging.info(f"[Client {self.client_id}] Early stopping in epoch {epoch+1}.")
                         pickle.dump(training_tracking, open(os.path.join(self.save_dir, "training_tracking.pkl"), "wb"))
                         break
             

@@ -54,6 +54,4 @@ Nguyen, V.T., Beuran, R. (2025). FedMSE: Semi-supervised federated learning appr
 https://doi.org/10.1016/j.cose.2025.104337
 ```
 
-}
-```
 
